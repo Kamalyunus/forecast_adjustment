@@ -10,9 +10,9 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="forecast-adjustment",
     version="0.1.0",
-    author="Forecast Adjustment Team",
-    author_email="example@example.com",
-    description="A system for adjusting forecasts using reinforcement learning with support for calendar effects",
+    author="Yunus Kamal",
+    author_email="yunus.kamal@gmail.com",
+    description="A system for adjusting forecasts using reinforcement learning with support for calendar effects, promos & holidays",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/kamalyunus/forecast-adjustment",
