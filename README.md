@@ -20,26 +20,23 @@ The Forecast Adjustment System uses Q-learning with linear function approximatio
 forecast_adjustment/
 │
 ├── forecast_adjustment/            # Main package directory
+│   ├── __init__.py                 # Package initialization
 │   ├── agent.py                    # Enhanced linear agent implementation
 │   ├── environment.py              # Enhanced forecast environment implementation
 │   ├── trainer.py                  # Enhanced trainer implementation
+│   ├── cli.py                      # Command line interface
 │   │
 │   ├── utils/                      # Utility functions and helpers
-│   │   ├── data_generator.py       # Data generation with calendar effects
-│   │   ├── visualization.py        # Enhanced visualization utilities
-│   │   └── metrics.py              # Accuracy metrics calculation
+│   │   ├── __init__.py
+│   │   └── data_generator.py       # Data generation with calendar effects
 │   │
-│   ├── data/                       # Data handling and processing
-│   │   ├── loader.py               # Data loading utilities
-│   │   └── preprocessor.py         # Data preprocessing utilities
-│   │
-│   └── config.py                   # Configuration management
+│   └── data/                       # Data handling and processing
+│       ├── __init__.py
+│       └── loader.py               # Data loading and validation utilities
 │
-├── examples/                       # Example scripts
-│   ├── basic_example.py            # Basic usage example
-│   └── calendar_comparison.py      # Comparison of different calendar effects
-│
-└── tests/                          # Unit and integration tests
+└── examples/                       # Example scripts
+    ├── basic_example.py            # Basic usage example
+    └── calendar_comparison.py      # Comparison of different calendar effects
 ```
 
 ## Installation
@@ -55,19 +52,64 @@ forecast_adjustment/
 ### Install from source
 
 ```bash
-git clone https://github.com/yourusername/forecast-adjustment.git
+git clone https://github.com/kamalyunus/forecast-adjustment.git
 cd forecast-adjustment
 pip install -e .
 ```
 
-## Quick Start
+## Command Line Usage
 
-Here's a simple example of how to use the forecast adjustment system:
+The system provides a user-friendly command-line interface with various modes of operation:
+
+### Generate Sample Data
+
+```bash
+forecast-adjust --mode generate-data --output-dir data --num-skus 100 --forecast-days 14
+```
+
+### Train a Model
+
+```bash
+forecast-adjust --mode train \
+  --forecast-file data/forecast_data.csv \
+  --historical-file data/historical_data.csv \
+  --holiday-file data/holiday_data.csv \
+  --promotion-file data/promotion_data.csv \
+  --output-dir output \
+  --episodes 100 \
+  --optimize-for both
+```
+
+### Evaluate a Model
+
+```bash
+forecast-adjust --mode evaluate \
+  --forecast-file data/forecast_data.csv \
+  --historical-file data/historical_data.csv \
+  --holiday-file data/holiday_data.csv \
+  --promotion-file data/promotion_data.csv \
+  --model-path output/models/final_model.pkl \
+  --output-dir output/evaluation
+```
+
+### Generate Adjusted Forecasts
+
+```bash
+forecast-adjust --mode adjust \
+  --forecast-file data/forecast_data.csv \
+  --holiday-file data/holiday_data.csv \
+  --promotion-file data/promotion_data.csv \
+  --model-path output/models/final_model.pkl \
+  --output-dir output/adjusted \
+  --start-date 2023-01-01
+```
+
+## Python API Usage
+
+Here's a simple example of how to use the forecast adjustment system programmatically:
 
 ```python
-from forecast_adjustment.agent import ForecastAgent
-from forecast_adjustment.environment import ForecastEnvironment
-from forecast_adjustment.trainer import ForecastTrainer
+from forecast_adjustment import ForecastAgent, ForecastEnvironment, ForecastTrainer
 from forecast_adjustment.utils.data_generator import generate_complete_dataset
 
 # Generate sample data
@@ -195,6 +237,17 @@ custom_factors = [0.4, 0.7, 1.0, 1.3, 1.6, 2.0]
 agent = ForecastAgent(..., adjustment_factors=custom_factors)
 ```
 
+### Saving and Loading Models
+
+Models can be saved and loaded for later use:
+```python
+# Save the model
+agent.save("models/my_model.pkl")
+
+# Load the model
+loaded_agent = ForecastAgent.load("models/my_model.pkl")
+```
+
 ## Visualization
 
 The system generates several visualizations to help understand the adjustment patterns:
@@ -205,6 +258,8 @@ The system generates several visualizations to help understand the adjustment pa
 - Day-of-week patterns
 - Holiday vs. non-holiday comparisons
 - Promotion vs. non-promotion comparisons
+
+All visualizations are automatically saved to the specified output directory.
 
 ## License
 
