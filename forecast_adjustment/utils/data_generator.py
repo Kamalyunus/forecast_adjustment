@@ -222,7 +222,7 @@ def generate_holiday_data(start_date: Optional[datetime] = None,
     holidays = []
     
     for idx in holiday_indices:
-        holiday_date = start_date + timedelta(days=idx)
+        holiday_date = start_date + timedelta(days=int(idx))
         
         # Select a random holiday name
         holiday_name = np.random.choice(holiday_names)
