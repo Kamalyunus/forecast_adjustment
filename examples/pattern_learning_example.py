@@ -72,7 +72,7 @@ def train_pattern_agent(forecast_data, actual_data, holiday_data, promo_data, ou
     """Train an agent to learn forecast adjustment patterns."""
     logger.info("Creating forecast environment with pattern data")
     
-    # Create environment
+    # Create environment with improved reward structure
     env = ForecastEnvironment(
         forecast_data=forecast_data,
         actual_data=actual_data,
@@ -80,6 +80,8 @@ def train_pattern_agent(forecast_data, actual_data, holiday_data, promo_data, ou
         promotion_data=promo_data,
         forecast_horizon=14,
         optimize_for="both",
+        reward_scaling=10.0,  # Higher reward scaling for stronger learning signal
+        pattern_emphasis=2.0,  # Emphasis on pattern-specific rewards
         logger=logger
     )
     
@@ -89,30 +91,57 @@ def train_pattern_agent(forecast_data, actual_data, holiday_data, promo_data, ou
     
     logger.info(f"Feature dimensions: {feature_dims}")
     
-    # Create agent
-    logger.info("Creating forecast agent")
+    # Create agent with improved learning capabilities
+    logger.info("Creating forecast agent with context-specific learning")
     agent = ForecastAgent(
         feature_dim=total_feature_dim,
         action_size=11,
-        learning_rate=0.01,
-        gamma=0.99,
+        learning_rate=0.005,  # Lower learning rate for more stable learning
+        gamma=0.95,  # Slightly reduced discount factor to focus more on immediate rewards
         epsilon_start=1.0,
-        epsilon_end=0.01,
-        epsilon_decay=0.995,
+        epsilon_end=0.05,  # Increased minimum exploration
+        epsilon_decay=0.998,  # Slower decay for more exploration
+        context_learning=True,  # Enable context-specific learning
         logger=logger
     )
     
-    # Create trainer
-    logger.info("Creating forecast trainer")
+    # Define curriculum learning phases
+    training_phases = [
+        {
+            'episodes': 100,  # First 20% - exploration phase
+            'epsilon': 0.9,
+            'learning_rate': 0.008,
+            'batch_size': 64,
+            'description': 'Initial exploration phase'
+        },
+        {
+            'episodes': 250,  # Next 50% - pattern learning phase
+            'epsilon': 0.5,
+            'learning_rate': 0.005,
+            'batch_size': 128,
+            'description': 'Pattern learning phase'
+        },
+        {
+            'episodes': 350,  # Final 30% - refinement phase
+            'epsilon': 0.1,
+            'learning_rate': 0.001,
+            'batch_size': 256,
+            'description': 'Fine-tuning phase'
+        }
+    ]
+    
+    # Create trainer with curriculum learning
+    logger.info("Creating forecast trainer with curriculum learning")
     trainer = ForecastTrainer(
         agent=agent,
         environment=env,
         output_dir=output_dir,
-        num_episodes=100,  # More episodes for better learning
-        max_steps=1000,  # Make sure we process all historical forecasts
+        num_episodes=700,  # More episodes for better learning
+        max_steps=14,
         batch_size=64,
-        save_every=10,
+        save_every=50,
         optimize_for="both",
+        training_phases=training_phases,
         logger=logger
     )
     
@@ -137,6 +166,13 @@ def train_pattern_agent(forecast_data, actual_data, holiday_data, promo_data, ou
     logger.info(f"  Weekend MAPE Improvement: {train_metrics['weekend_metrics']['mape_improvements'][-1]:.4f}")
     logger.info(f"  Weekday MAPE Improvement: {train_metrics['weekday_metrics']['mape_improvements'][-1]:.4f}")
     
+    # Pattern-specific metrics
+    if 'pattern_metrics' in train_metrics:
+        logger.info("Pattern-specific final improvements:")
+        for pattern, metrics in train_metrics['pattern_metrics'].items():
+            if metrics['mape_improvements']:
+                logger.info(f"  {pattern} MAPE Improvement: {metrics['mape_improvements'][-1]:.4f}")
+    
     return env, agent, trainer, train_metrics
 
 
@@ -158,6 +194,12 @@ def evaluate_pattern_learning(env, agent, trainer, output_dir, logger):
     logger.info(f"  Promotion MAPE Improvement: {eval_metrics['context_metrics']['promotion']['avg_mape_improvement']:.4f}")
     logger.info(f"  Weekend MAPE Improvement: {eval_metrics['context_metrics']['weekend']['avg_mape_improvement']:.4f}")
     logger.info(f"  Weekday MAPE Improvement: {eval_metrics['context_metrics']['weekday']['avg_mape_improvement']:.4f}")
+    
+    # Pattern-specific evaluation metrics
+    if 'pattern_metrics' in eval_metrics:
+        logger.info("Pattern-specific evaluation results:")
+        for pattern, metrics in eval_metrics['pattern_metrics'].items():
+            logger.info(f"  {pattern} MAPE Improvement: {metrics['avg_mape_improvement']:.4f}")
     
     # Extract top performing SKUs by pattern
     logger.info("Top performing SKUs by pattern:")
@@ -230,8 +272,12 @@ def visualize_pattern_learning(env, adjusted_forecasts, output_dir, logger):
         if date_col in adjusted_forecasts.columns:
             adjusted_forecasts = adjusted_forecasts.rename(columns={date_col: 'date'})
     
+    # Add pattern_type to adjusted forecasts if not present
+    if 'pattern_type' not in adjusted_forecasts.columns and sku_patterns:
+        adjusted_forecasts['pattern_type'] = adjusted_forecasts['sku_id'].map(sku_patterns)
+    
     # Select needed columns from adjusted forecasts
-    needed_cols = ['sku_id', 'date', 'original_forecast', 'adjusted_forecast']
+    needed_cols = ['sku_id', 'date', 'original_forecast', 'adjusted_forecast', 'pattern_type']
     context_cols = ['is_holiday', 'is_promotion', 'is_weekend']
     available_cols = [col for col in needed_cols + context_cols if col in adjusted_forecasts.columns]
     
@@ -247,7 +293,7 @@ def visualize_pattern_learning(env, adjusted_forecasts, output_dir, logger):
     actual_data_path = os.path.join(output_dir, "data", "historical_actuals.csv")
     actuals_df = pd.read_csv(actual_data_path)
     
-    # Rename pattern_type to match if needed
+    # Add pattern_type to actuals if not present
     if 'pattern_type' not in actuals_df.columns and sku_patterns:
         actuals_df['pattern_type'] = actuals_df['sku_id'].map(sku_patterns)
     
