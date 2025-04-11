@@ -96,20 +96,11 @@ class ForecastAgent:
         self.logger.info(f"Using adjustment factors: {self.adjustment_factors}")
         
     def normalize_features(self, features: np.ndarray) -> np.ndarray:
-        """
-        Normalize features to improve learning stability.
-        Uses running mean and standard deviation.
+        """Normalize features to improve learning stability."""
+        # Replace any NaN or Inf values with zeros
+        if np.isnan(features).any() or np.isinf(features).any():
+            features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
         
-        Args:
-            features: Raw state features
-            
-        Returns:
-            Normalized features
-        """
-        # Check for NaN values and replace with zeros
-        if np.isnan(features).any():
-            features = np.nan_to_num(features, nan=0.0)
-            
         # Update feature statistics (during training)
         if self.feature_count < 10000:  # Only update for the first N observations
             self.feature_count += 1
@@ -122,13 +113,19 @@ class ForecastAgent:
                 var_sum = np.sum(delta * delta2, axis=0)
                 self.feature_stds = np.sqrt(var_sum / self.feature_count + 1e-8)
         
-        # Normalize features
-        normalized = (features - self.feature_means) / (self.feature_stds + 1e-8)
+        # Ensure feature_stds is positive to avoid division by zero
+        self.feature_stds = np.maximum(self.feature_stds, 1e-8)
         
-        # Additional check for NaN after normalization
-        if np.isnan(normalized).any():
-            normalized = np.nan_to_num(normalized, nan=0.0)
-            
+        # Normalize features
+        normalized = (features - self.feature_means) / self.feature_stds
+        
+        # Clip to prevent extreme values
+        normalized = np.clip(normalized, -10.0, 10.0)
+        
+        # Final check for NaN or Inf
+        if np.isnan(normalized).any() or np.isinf(normalized).any():
+            normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+        
         return normalized
     
     def get_q_values(self, features: np.ndarray) -> np.ndarray:
@@ -189,38 +186,25 @@ class ForecastAgent:
         
         return action
     
-    def update(self, state: np.ndarray, action: int, reward: float, 
-               next_state: np.ndarray, done: bool) -> float:
-        """
-        Update the weights based on a single experience.
-        
-        Args:
-            state: Current state features
-            action: Action taken
-            reward: Reward received
-            next_state: Next state features
-            done: Whether the episode is done
-            
-        Returns:
-            TD error magnitude
-        """
-        # Check for NaN values
-        if np.isnan(state).any() or np.isnan(next_state).any() or np.isnan(reward):
-            # Return zero TD error if there are NaN values
+    def update(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool) -> float:
+        """Update weights based on a single experience."""
+        # Check for NaN/Inf values in inputs
+        if (np.isnan(state).any() or np.isinf(state).any() or 
+            np.isnan(next_state).any() or np.isinf(next_state).any() or 
+            np.isnan(reward) or np.isinf(reward)):
+            self.logger.warning("NaN or Inf detected in update inputs, skipping update")
             return 0.0
-            
-        # Store experience in buffer
-        if len(self.buffer) < self.buffer_size:
-            self.buffer.append((state, action, reward, next_state, done))
-        else:
-            self.buffer[self.buffer_idx] = (state, action, reward, next_state, done)
-            self.buffer_idx = (self.buffer_idx + 1) % self.buffer_size
         
         # Normalize states
         norm_state = self.normalize_features(state)
         norm_next_state = self.normalize_features(next_state)
         
-        # Current Q-value: Q(s,a) = w_a^T * state
+        # Check for NaN/Inf after normalization
+        if np.isnan(norm_state).any() or np.isinf(norm_state).any():
+            self.logger.warning("NaN or Inf detected in normalized state, skipping update")
+            return 0.0
+        
+        # Current Q-value
         current_q = np.dot(self.weights[action], norm_state)
         
         # Next state's best Q-value
@@ -228,20 +212,26 @@ class ForecastAgent:
             next_q = 0
         else:
             next_q_values = np.dot(self.weights, norm_next_state)
+            # Check for NaN/Inf in Q-values
+            if np.isnan(next_q_values).any() or np.isinf(next_q_values).any():
+                self.logger.warning("NaN or Inf detected in next Q-values, skipping update")
+                return 0.0
             next_q = np.max(next_q_values)
         
-        # Calculate target using standard Q-learning update
+        # Calculate target and TD error
         target = reward + self.gamma * next_q
-        
-        # Handle potential NaN values
-        if np.isnan(current_q) or np.isnan(target):
-            return 0.0
-            
-        # TD error
         td_error = target - current_q
         
-        # Update weights for the selected action
-        self.weights[action] += self.learning_rate * td_error * norm_state
+        # Clip TD error to prevent extreme updates
+        td_error_clipped = np.clip(td_error, -100.0, 100.0)
+        
+        # Check for NaN/Inf before weight update
+        if np.isnan(td_error_clipped) or np.isinf(td_error_clipped):
+            self.logger.warning("NaN or Inf TD error detected, skipping update")
+            return 0.0
+        
+        # Update weights
+        self.weights[action] += self.learning_rate * td_error_clipped * norm_state
         
         # Decay epsilon
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)

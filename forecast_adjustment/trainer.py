@@ -105,7 +105,7 @@ class ForecastTrainer:
         Returns:
             Dictionary of calendar features
         """
-        forecast_dim, error_dim, calendar_dim, holiday_dim, promo_dim, _ = feature_dims
+        forecast_dim, error_dim, calendar_dim, holiday_dim, promo_dim, horizon_dim, _ = feature_dims
         
         # Calculate starting index for calendar features
         calendar_start = forecast_dim + error_dim
