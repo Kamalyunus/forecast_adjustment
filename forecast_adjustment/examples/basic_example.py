@@ -83,21 +83,21 @@ def main():
     # Step 4: Define training phases for curriculum learning
     training_phases = [
         {
-            'episodes': 20,  # Initial exploration
+            'episodes': 50,  # Initial exploration
             'epsilon': 0.9,
             'learning_rate': 0.008,
             'batch_size': 32,
             'description': 'Initial exploration phase'
         },
         {
-            'episodes': 40,  # Pattern and band learning
+            'episodes': 100,  # Pattern and band learning
             'epsilon': 0.5,
             'learning_rate': 0.005,
             'batch_size': 64,
             'description': 'Pattern and band learning phase'
         },
         {
-            'episodes': 40,  # Refinement
+            'episodes': 150,  # Refinement
             'epsilon': 0.1,
             'learning_rate': 0.001,
             'batch_size': 128,
@@ -111,7 +111,7 @@ def main():
         agent=agent,
         environment=env,
         output_dir=output_dir,
-        num_episodes=100,  # For a quick example
+        num_episodes=300,  # For a quick example
         max_steps=14,
         save_every=25,
         training_phases=training_phases,
