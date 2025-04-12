@@ -1,6 +1,5 @@
 """
-Enhanced Forecast Training Environment - Environment for training forecast adjustment
-with SKU banding (A-E) for better inventory management.
+Reinforcement learning environment for training forecast adjustment models.
 """
 
 import numpy as np
@@ -13,13 +12,18 @@ from datetime import datetime, timedelta
 class ForecastEnvironment:
     """
     Environment for training RL agents to adjust forecasts using historical forecasts
-    and evaluating complete forecast horizons against actual data, with support for SKU banding.
+    and evaluating complete forecast horizons against actual data, with support for:
+    
+    - SKU banding (A-E based on sales volume)
+    - Calendar effects (day-of-week patterns, weekends)
+    - Holidays and promotions
+    - Different optimization targets (MAPE, Bias, or both)
     """
     
     def __init__(self, 
                 forecast_data: pd.DataFrame,
                 actual_data: pd.DataFrame,
-                sku_band_data: Optional[pd.DataFrame] = None,  # New: SKU banding information
+                sku_band_data: Optional[pd.DataFrame] = None,
                 holiday_data: Optional[pd.DataFrame] = None,
                 promotion_data: Optional[pd.DataFrame] = None,
                 forecast_horizon: int = 14,
@@ -28,10 +32,10 @@ class ForecastEnvironment:
                 end_date: Optional[str] = None,
                 reward_scaling: float = 5.0,
                 pattern_emphasis: float = 1.5,
-                band_emphasis: float = 1.8,  # New: Emphasis for band-specific rewards
+                band_emphasis: float = 1.8,
                 logger: Optional[logging.Logger] = None):
         """
-        Initialize the forecast adjustment environment with SKU banding support.
+        Initialize the forecast adjustment environment.
         
         Args:
             forecast_data: DataFrame with forecast data (must have forecast_date and ml_day_X columns)
@@ -172,7 +176,7 @@ class ForecastEnvironment:
                     'adjusted_bias': []
                 }
         
-        # NEW: Performance tracking for each band
+        # Performance tracking for each band
         self.band_performance = {
             'A': {'original_mape': [], 'adjusted_mape': [], 'original_bias': [], 'adjusted_bias': []},
             'B': {'original_mape': [], 'adjusted_mape': [], 'original_bias': [], 'adjusted_bias': []},
@@ -325,7 +329,7 @@ class ForecastEnvironment:
         # Horizon position indicator: one-hot encoding of which day in the horizon
         horizon_position_dim = self.forecast_horizon
         
-        # NEW: Band features: one-hot encoding of band (A-E)
+        # Band features: one-hot encoding of band (A-E)
         band_dim = 5
         
         # Total dimensions
@@ -369,7 +373,7 @@ class ForecastEnvironment:
         # Use the first matching row
         sku_forecast = sku_forecasts.iloc[0]
         
-        # 1. Extract forecasts for the next N days (typically include all days in horizon)
+        # 1. Extract forecasts for the next N days
         forecasts = []
         for i in range(self.forecast_horizon):
             day_idx = i + 1
@@ -429,7 +433,7 @@ class ForecastEnvironment:
         if 0 <= horizon_day < self.forecast_horizon:
             horizon_position[horizon_day] = 1.0
         
-        # 7. NEW: Add band indicator (one-hot encoding)
+        # 7. Add band indicator (one-hot encoding)
         band = self._get_sku_band(sku)
         band_indicator = np.zeros(5)  # A-E: 5 bands
         band_index = {'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4}.get(band, 2)  # Default to C (index 2)
@@ -575,7 +579,7 @@ class ForecastEnvironment:
             'target_date': {},
             'has_actual': {},
             'pattern_type': {},
-            'sku_band': {}  # NEW: Track SKU band info
+            'sku_band': {}
         }
         
         # Get current forecast date
@@ -767,7 +771,7 @@ class ForecastEnvironment:
                     est_mape_improvement = 0.0
                     est_bias_improvement = 0.0
                     
-                    # NEW: Band-specific heuristics
+                    # Band-specific heuristics
                     if sku_band in ['A', 'B']:  # High-volume, fast-selling items
                         if is_holiday or is_promotion:
                             # For high-volume items during events, reward upward adjustments (avoid stockouts)
@@ -950,7 +954,7 @@ class ForecastEnvironment:
                 'day_of_week': target_date.weekday(),
                 'day_of_month': target_date.day,
                 'pattern_type': pattern_type,
-                'sku_band': sku_band  # NEW: Record SKU band
+                'sku_band': sku_band
             })
         
         # Update baseline metrics (first time we have actuals)

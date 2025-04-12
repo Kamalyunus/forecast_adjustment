@@ -1,5 +1,5 @@
-forecast_adjustment.egg-info/
-data/
 forecast_adjustment/__pycache__/
+forecast_adjustment/core/__pycache__/
+forecast_adjustment/data/__pycache__/
 forecast_adjustment/utils/__pycache__/
 output/

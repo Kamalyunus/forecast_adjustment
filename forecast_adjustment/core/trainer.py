@@ -1,6 +1,5 @@
 """
-Enhanced Trainer Module - Handles training, evaluation, and forecast generation
-with improved learning mechanisms for different forecast patterns and SKU bands.
+Trainer module for forecast adjustment using reinforcement learning.
 """
 
 import numpy as np
@@ -15,8 +14,13 @@ from tqdm import tqdm
 
 class ForecastTrainer:
     """
-    Enhanced trainer for forecast adjustment with better support for learning
-    different patterns like calendar effects, holidays, promotions, and SKU bands.
+    Trainer for the forecast adjustment system with support for:
+    
+    - Curriculum learning (phased training with different exploration rates)
+    - Comprehensive metrics tracking
+    - Context-specific performance analysis (holidays, promotions, weekends)
+    - Band-specific performance analysis (A-E bands)
+    - Pattern-specific learning and metrics
     """
     
     def __init__(self, 
@@ -31,18 +35,18 @@ class ForecastTrainer:
                 training_phases: Optional[List[Dict]] = None,
                 logger: Optional[logging.Logger] = None):
         """
-        Initialize enhanced trainer with SKU band support.
+        Initialize trainer with curriculum learning support.
         
         Args:
-            agent: Enhanced linear agent with band support
-            environment: Enhanced forecast environment with band support
+            agent: Q-learning agent with context-specific learning
+            environment: Forecast environment with band support
             output_dir: Directory for outputs
             num_episodes: Number of episodes to train
             max_steps: Maximum steps per episode
             batch_size: Batch size for updates
             save_every: How often to save the model
             optimize_for: Which metric to optimize for ("mape", "bias", or "both")
-            training_phases: Optional list of training phase configurations for curriculum learning
+            training_phases: Optional list of training phase configurations
             logger: Logger instance
         """
         self.agent = agent
@@ -56,10 +60,7 @@ class ForecastTrainer:
         
         # Set up curriculum learning phases
         if training_phases is None:
-            # Default training phases if none provided:
-            # 1. First 20% of episodes: high exploration, focus on general patterns
-            # 2. Next 40% of episodes: medium exploration, focus on specific patterns
-            # 3. Final 40% of episodes: low exploration, fine-tuning
+            # Default training phases if none provided
             self.training_phases = [
                 {
                     'episodes': int(num_episodes * 0.2),
@@ -136,7 +137,7 @@ class ForecastTrainer:
             'bias_improvements': []
         }
         
-        # NEW: Band-specific metrics
+        # Band-specific metrics
         self.band_metrics = {
             'A': {'scores': [], 'mape_improvements': [], 'bias_improvements': []},
             'B': {'scores': [], 'mape_improvements': [], 'bias_improvements': []},
@@ -174,7 +175,7 @@ class ForecastTrainer:
         # Extract calendar features (is_weekend from the first day's features)
         is_weekend = False
         if len(state) > calendar_start + 2:  # Ensure we have calendar features
-            # Calendar features are structured as [day_of_week, day_of_month, is_weekend] for each day
+            # Calendar features are structured as [day_of_week, day_of_month, is_weekend]
             is_weekend = bool(state[calendar_start + 2] > 0.5)  # Third feature is is_weekend
         
         # Extract SKU band (one-hot encoding)
@@ -192,8 +193,7 @@ class ForecastTrainer:
         
     def train(self, verbose: bool = True) -> Dict:
         """
-        Train the agent for forecast adjustment using curriculum learning,
-        with support for SKU banding.
+        Train the agent for forecast adjustment using curriculum learning.
         
         Args:
             verbose: Whether to print progress
@@ -241,7 +241,7 @@ class ForecastTrainer:
                     'weekday': {'scores': [], 'mape_imps': [], 'bias_imps': []}
                 }
                 
-                # NEW: Track band-specific metrics
+                # Track band-specific metrics
                 band_metrics = {
                     'A': {'scores': [], 'mape_imps': [], 'bias_imps': []},
                     'B': {'scores': [], 'mape_imps': [], 'bias_imps': []},
@@ -284,7 +284,7 @@ class ForecastTrainer:
                             'is_promotion': False,  # Will be updated after the environment step
                             'is_weekend': is_weekend,
                             'pattern_type': pattern_type,
-                            'sku_band': sku_band  # NEW: Add band information
+                            'sku_band': sku_band
                         }
                         
                         # Apply phase-specific exploration strategies
@@ -409,7 +409,7 @@ class ForecastTrainer:
                             'is_promotion': is_promo,
                             'is_weekend': is_weekend,
                             'pattern_type': pattern_type,
-                            'sku_band': sku_band  # NEW: Include band information
+                            'sku_band': sku_band
                         }
                         
                         # Update agent with context
@@ -479,7 +479,7 @@ class ForecastTrainer:
                     self.weekday_metrics['mape_improvements'].append(0.0)
                     self.weekday_metrics['bias_improvements'].append(0.0)
                 
-                # NEW: Store band-specific metrics
+                # Store band-specific metrics
                 for band in self.band_metrics:
                     if band in band_metrics and band_metrics[band]['scores']:
                         self.band_metrics[band]['scores'].append(np.mean(band_metrics[band]['scores']))
@@ -564,7 +564,7 @@ class ForecastTrainer:
         # Plot pattern-specific learning curves
         self._plot_pattern_learning()
         
-        # NEW: Plot band-specific learning curves
+        # Plot band-specific learning curves
         self._plot_band_learning()
         
         # Return metrics
@@ -588,175 +588,6 @@ class ForecastTrainer:
         
         return metrics
     
-    def evaluate(self, num_episodes: int = 10, verbose: bool = True) -> Dict:
-        """
-        Evaluate the forecast adjustment agent with context-specific metrics.
-        
-        Args:
-            num_episodes: Number of episodes to evaluate
-            verbose: Whether to print progress
-            
-        Returns:
-            Dictionary of evaluation metrics
-        """
-        self.logger.info(f"Starting evaluation for {num_episodes} episodes")
-        
-        # Evaluation metrics
-        eval_scores = []
-        eval_mape_improvements = []
-        eval_bias_improvements = []
-        
-        # Context-specific metrics
-        context_metrics = {
-            'holiday': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
-            'promotion': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
-            'weekend': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
-            'weekday': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0}
-        }
-        
-        # Band-specific metrics
-        band_metrics = {
-            'A': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
-            'B': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
-            'C': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
-            'D': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
-            'E': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0}
-        }
-        
-        # Store current agent state
-        original_epsilon = self.agent.epsilon
-        self.agent.epsilon = 0  # Turn off exploration for evaluation
-        
-        # Evaluation loop
-        for episode in range(1, num_episodes + 1):
-            state = self.env.reset()
-            episode_score = 0
-            
-            # Track metrics for this episode
-            original_mapes = []
-            adjusted_mapes = []
-            original_biases = []
-            adjusted_biases = []
-            
-            for step in range(self.max_steps):
-                adjustments = {}
-                
-                # Get actions for all SKUs (no exploration)
-                for i, sku in enumerate(self.env.skus):
-                    # Get feature dimensions
-                    feature_dims = self.env.get_feature_dims()
-                    
-                    # Extract context features
-                    context_features = self._extract_context_features(state[i], feature_dims)
-                    sku_band = context_features.get('sku_band', 'C')
-                    
-                    # Create context dictionary
-                    context = {
-                        'is_holiday': False,  # Will be set after env step
-                        'is_promotion': False,  # Will be set after env step
-                        'is_weekend': context_features.get('is_weekend', False),
-                        'sku_band': sku_band
-                    }
-                    
-                    # Get action (no exploration)
-                    action_idx = self.agent.act(state[i], explore=False, context=context)
-                    
-                    # Calculate adjusted forecast
-                    forecast = state[i][0]  # First value is the current forecast
-                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, forecast, context)
-                    
-                    adjustments[sku] = (action_idx, adjusted_forecast)
-                
-                # Take step in environment
-                next_state, rewards, done, info = self.env.step(adjustments)
-                
-                # Update metrics
-                episode_score += sum(rewards.values())
-                
-                # Track MAPE and bias
-                for sku in self.env.skus:
-                    original_mapes.append(info['original_mape'][sku])
-                    adjusted_mapes.append(info['adjusted_mape'][sku])
-                    original_biases.append(abs(info['original_bias'][sku]))
-                    adjusted_biases.append(abs(info['adjusted_bias'][sku]))
-                
-                state = next_state
-                if done:
-                    break
-            
-            # Calculate episode metrics
-            avg_original_mape = np.mean(original_mapes)
-            avg_adjusted_mape = np.mean(adjusted_mapes)
-            avg_original_bias = np.mean(original_biases)
-            avg_adjusted_bias = np.mean(adjusted_biases)
-            
-            # Calculate improvements
-            mape_improvement = (avg_original_mape - avg_adjusted_mape) / avg_original_mape if avg_original_mape > 0 else 0
-            bias_improvement = (avg_original_bias - avg_adjusted_bias) / avg_original_bias if avg_original_bias > 0 else 0
-            
-            # Store metrics
-            eval_scores.append(episode_score)
-            eval_mape_improvements.append(mape_improvement)
-            eval_bias_improvements.append(bias_improvement)
-            
-            if verbose:
-                self.logger.info(f"Episode {episode}/{num_episodes} | Score: {episode_score:.2f} | MAPE Imp: {mape_improvement:.4f}")
-        
-        # Restore agent state
-        self.agent.epsilon = original_epsilon
-        
-        # Calculate aggregate metrics
-        avg_score = np.mean(eval_scores)
-        avg_mape_improvement = np.mean(eval_mape_improvements)
-        avg_bias_improvement = np.mean(eval_bias_improvements)
-        
-        # Approximate context-specific metrics from training data
-        context_metrics = {
-            'holiday': {
-                'avg_mape_improvement': np.mean(self.holiday_metrics['mape_improvements'][-50:]) if self.holiday_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(self.holiday_metrics['bias_improvements'][-50:]) if self.holiday_metrics['bias_improvements'] else 0
-            },
-            'promotion': {
-                'avg_mape_improvement': np.mean(self.promo_metrics['mape_improvements'][-50:]) if self.promo_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(self.promo_metrics['bias_improvements'][-50:]) if self.promo_metrics['bias_improvements'] else 0
-            },
-            'weekend': {
-                'avg_mape_improvement': np.mean(self.weekend_metrics['mape_improvements'][-50:]) if self.weekend_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(self.weekend_metrics['bias_improvements'][-50:]) if self.weekend_metrics['bias_improvements'] else 0
-            },
-            'weekday': {
-                'avg_mape_improvement': np.mean(self.weekday_metrics['mape_improvements'][-50:]) if self.weekday_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(self.weekday_metrics['bias_improvements'][-50:]) if self.weekday_metrics['bias_improvements'] else 0
-            }
-        }
-        
-        # Approximate band-specific metrics from training data
-        band_metrics = {}
-        for band in ['A', 'B', 'C', 'D', 'E']:
-            if band in self.band_metrics and self.band_metrics[band]['mape_improvements']:
-                band_metrics[band] = {
-                    'avg_mape_improvement': np.mean(self.band_metrics[band]['mape_improvements'][-50:]),
-                    'avg_bias_improvement': np.mean(self.band_metrics[band]['bias_improvements'][-50:])
-                }
-            else:
-                band_metrics[band] = {
-                    'avg_mape_improvement': 0,
-                    'avg_bias_improvement': 0
-                }
-        
-        metrics = {
-            'scores': eval_scores,
-            'mape_improvements': eval_mape_improvements,
-            'bias_improvements': eval_bias_improvements,
-            'avg_score': avg_score,
-            'avg_mape_improvement': avg_mape_improvement,
-            'avg_bias_improvement': avg_bias_improvement,
-            'context_metrics': context_metrics,
-            'band_metrics': band_metrics
-        }
-        
-        return metrics
-
     def _plot_training_progress(self):
         """Create enhanced plot of training progress metrics including context-specific performance."""
         plt.figure(figsize=(20, 15))
@@ -889,125 +720,9 @@ class ForecastTrainer:
         plt.savefig(os.path.join(self.log_dir, 'training_progress.png'))
         plt.close()
     
-    def _plot_pattern_learning(self):
-        """Create plot showing pattern-specific learning curves."""
-        if not self.pattern_metrics:
-            return  # No pattern data to plot
-        
-        plt.figure(figsize=(16, 12))
-        
-        # Plot pattern-specific MAPE improvements
-        plt.subplot(2, 2, 1)
-        for pattern, metrics in self.pattern_metrics.items():
-            plt.plot(metrics['mape_improvements'], label=pattern)
-        plt.title('Pattern-Specific MAPE Improvement')
-        plt.xlabel('Episode')
-        plt.ylabel('Improvement Ratio')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Plot pattern-specific scores
-        plt.subplot(2, 2, 2)
-        for pattern, metrics in self.pattern_metrics.items():
-            plt.plot(metrics['scores'], label=pattern)
-        plt.title('Pattern-Specific Rewards')
-        plt.xlabel('Episode')
-        plt.ylabel('Average Reward')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Plot average MAPE improvement by pattern (last 100 episodes)
-        plt.subplot(2, 2, 3)
-        window = min(100, len(next(iter(self.pattern_metrics.values()))['mape_improvements']))
-        pattern_avgs = []
-        pattern_names = []
-        
-        for pattern, metrics in self.pattern_metrics.items():
-            avg_imp = np.mean(metrics['mape_improvements'][-window:])
-            pattern_avgs.append(avg_imp)
-            pattern_names.append(pattern)
-        
-        plt.bar(pattern_names, pattern_avgs)
-        plt.title(f'Avg MAPE Improvement by Pattern (Last {window} Episodes)')
-        plt.ylabel('Improvement Ratio')
-        plt.xticks(rotation=45)
-        
-        # Plot moving average of each pattern's MAPE improvement
-        plt.subplot(2, 2, 4)
-        window_size = 25
-        for pattern, metrics in self.pattern_metrics.items():
-            if len(metrics['mape_improvements']) >= window_size:
-                moving_avg = np.convolve(metrics['mape_improvements'], np.ones(window_size)/window_size, mode='valid')
-                plt.plot(range(window_size-1, len(metrics['mape_improvements'])), moving_avg, label=pattern)
-        plt.title(f'Moving Average ({window_size} episodes) MAPE Improvement')
-        plt.xlabel('Episode')
-        plt.ylabel('Improvement Ratio')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.log_dir, 'pattern_learning.png'))
-        plt.close()
-    
-    def _plot_band_learning(self):
-        """Create plot showing band-specific learning curves."""
-        plt.figure(figsize=(16, 12))
-        
-        # Plot band-specific MAPE improvements
-        plt.subplot(2, 2, 1)
-        for band in ['A', 'B', 'C', 'D', 'E']:
-            plt.plot(self.band_metrics[band]['mape_improvements'], label=f'Band {band}')
-        plt.title('Band-Specific MAPE Improvement')
-        plt.xlabel('Episode')
-        plt.ylabel('Improvement Ratio')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Plot band-specific bias improvements
-        plt.subplot(2, 2, 2)
-        for band in ['A', 'B', 'C', 'D', 'E']:
-            plt.plot(self.band_metrics[band]['bias_improvements'], label=f'Band {band}')
-        plt.title('Band-Specific Bias Improvement')
-        plt.xlabel('Episode')
-        plt.ylabel('Improvement Ratio')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Plot average MAPE improvement by band (last 100 episodes)
-        plt.subplot(2, 2, 3)
-        window = min(100, len(self.band_metrics['A']['mape_improvements']))
-        bands = ['A', 'B', 'C', 'D', 'E']
-        band_avgs = []
-        
-        for band in bands:
-            avg_imp = np.mean(self.band_metrics[band]['mape_improvements'][-window:])
-            band_avgs.append(avg_imp)
-        
-        plt.bar(bands, band_avgs)
-        plt.title(f'Avg MAPE Improvement by Band (Last {window} Episodes)')
-        plt.ylabel('Improvement Ratio')
-        
-        # Plot average Bias improvement by band (last 100 episodes)
-        plt.subplot(2, 2, 4)
-        window = min(100, len(self.band_metrics['A']['bias_improvements']))
-        bands = ['A', 'B', 'C', 'D', 'E']
-        band_bias_avgs = []
-        
-        for band in bands:
-            avg_imp = np.mean(self.band_metrics[band]['bias_improvements'][-window:])
-            band_bias_avgs.append(avg_imp)
-        
-        plt.bar(bands, band_bias_avgs)
-        plt.title(f'Avg Bias Improvement by Band (Last {window} Episodes)')
-        plt.ylabel('Improvement Ratio')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.log_dir, 'band_learning.png'))
-        plt.close()
-    
     def generate_adjusted_forecasts(self, num_days: int = 14) -> pd.DataFrame:
         """
-        Generate adjusted forecasts using the trained agent, with context-specific information.
+        Generate adjusted forecasts using the trained agent.
         
         Args:
             num_days: Number of days to forecast
@@ -1185,7 +900,7 @@ class ForecastTrainer:
                     if len(pattern_df) > 0:
                         self.logger.info(f"{pattern} adjustments: {len(pattern_df)} rows, avg factor: {pattern_df['adjustment_factor'].mean():.4f}")
         
-        # Save visualizations
+        # Save visualizations of adjustments
         self._visualize_forecast_adjustments(df)
         
         return df
@@ -1197,10 +912,10 @@ class ForecastTrainer:
         Args:
             adjustments_df: DataFrame of adjustments
         """
-        plt.figure(figsize=(24, 20))
+        plt.figure(figsize=(15, 12))
         
         # Plot 1: Distribution of adjustment factors
-        plt.subplot(4, 3, 1)
+        plt.subplot(2, 2, 1)
         adjustment_counts = adjustments_df['action_idx'].value_counts().sort_index()
         factors = self.agent.adjustment_factors
         
@@ -1212,58 +927,8 @@ class ForecastTrainer:
         plt.xticks(rotation=45)
         plt.grid(True, alpha=0.3)
         
-        # Plot 2: Average adjustment by day
-        plt.subplot(4, 3, 2)
-        if 'day' in adjustments_df.columns:
-            day_factors = adjustments_df.groupby('day')['adjustment_factor'].mean()
-            plt.plot(day_factors.index, day_factors.values, 'o-')
-            plt.title('Average Adjustment Factor by Day')
-            plt.xlabel('Day')
-            plt.ylabel('Avg Factor')
-            plt.grid(True, alpha=0.3)
-        
-        # Plot 3: Band-specific adjustments
-        plt.subplot(4, 3, 3)
-        
-        band_avgs = []
-        bands = []
-        
-        if 'sku_band' in adjustments_df.columns:
-            for band in sorted(adjustments_df['sku_band'].unique()):
-                band_df = adjustments_df[adjustments_df['sku_band'] == band]
-                if len(band_df) > 0:
-                    bands.append(band)
-                    band_avgs.append(band_df['adjustment_factor'].mean())
-        
-        if bands:
-            plt.bar(bands, band_avgs, color=['blue', 'green', 'gray', 'orange', 'red'][:len(bands)])
-            plt.title('Average Adjustment Factor by SKU Band')
-            plt.ylabel('Avg Factor')
-            plt.grid(True, alpha=0.3)
-            
-            # Add value labels
-            for i, v in enumerate(band_avgs):
-                plt.text(i, v + 0.01, f"{v:.2f}", ha='center')
-        
-        # Plot 4: Day of week adjustments
-        plt.subplot(4, 3, 4)
-        if 'day_of_week' in adjustments_df.columns:
-            dow_mapping = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
-            adjustments_df['day_name'] = adjustments_df['day_of_week'].map(dow_mapping)
-            
-            dow_factors = adjustments_df.groupby('day_name')['adjustment_factor'].mean()
-            
-            # Sort by day of week
-            dow_order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-            dow_factors = dow_factors.reindex(dow_order)
-            
-            plt.bar(dow_factors.index, dow_factors.values)
-            plt.title('Average Adjustment Factor by Day of Week')
-            plt.ylabel('Avg Factor')
-            plt.grid(True, alpha=0.3)
-        
-        # Plot 5: Context-specific adjustments
-        plt.subplot(4, 3, 5)
+        # Plot 2: Average adjustment by context
+        plt.subplot(2, 2, 2)
         
         contexts = []
         avg_factors = []
@@ -1305,292 +970,339 @@ class ForecastTrainer:
         plt.xticks(rotation=45)
         plt.grid(True, alpha=0.3)
         
-        # Plot 6: Adjustment percentage distribution
-        plt.subplot(4, 3, 6)
-        # Calculate percentage adjustments
-        pct_changes = ((adjustments_df['adjusted_forecast'] - adjustments_df['original_forecast']) 
-                     / adjustments_df['original_forecast'].clip(lower=1e-8)) * 100
-        # Remove extreme values for better visualization
-        pct_changes = pct_changes.clip(lower=-50, upper=50)
-        plt.hist(pct_changes, bins=20)
-        plt.title('Adjustment Percentage Distribution')
-        plt.xlabel('Adjustment (%)')
-        plt.ylabel('Count')
-        plt.grid(True, alpha=0.3)
+        # Plot 3: Band-specific adjustments
+        plt.subplot(2, 2, 3)
         
-        # Plot 7: Band-specific adjustment distributions
-        plt.subplot(4, 3, 7)
-        if 'sku_band' in adjustments_df.columns and len(adjustments_df['sku_band'].unique()) > 1:
-            # Count bands
-            bands = ['A', 'B', 'C', 'D', 'E']
-            existing_bands = [b for b in bands if b in adjustments_df['sku_band'].unique()]
-            
-            if len(existing_bands) >= 2:  # At least 2 bands to compare
-                # Set up X positions
-                x = np.arange(len(self.agent.adjustment_factors))
-                width = 0.8 / len(existing_bands)
-                
-                # For visualizing only high and low bands
-                high_band = existing_bands[0]  # A or B
-                low_band = existing_bands[-1]   # D or E
-                
-                high_df = adjustments_df[adjustments_df['sku_band'] == high_band]
-                low_df = adjustments_df[adjustments_df['sku_band'] == low_band]
-                
-                # Count by action index for each band
-                high_counts = np.zeros(len(self.agent.adjustment_factors))
-                low_counts = np.zeros(len(self.agent.adjustment_factors))
-                
-                for action_idx in range(len(self.agent.adjustment_factors)):
-                    high_counts[action_idx] = len(high_df[high_df['action_idx'] == action_idx])
-                    low_counts[action_idx] = len(low_df[low_df['action_idx'] == action_idx])
-                
-                # Convert to percentages
-                if sum(high_counts) > 0:
-                    high_counts = high_counts / sum(high_counts)
-                if sum(low_counts) > 0:
-                    low_counts = low_counts / sum(low_counts)
-                
-                # Plot with offset for each band
-                plt.bar(x - width/2, high_counts, width, label=f'Band {high_band} (Fast)')
-                plt.bar(x + width/2, low_counts, width, label=f'Band {low_band} (Slow)')
-                
-                plt.title(f'Band {high_band} vs Band {low_band} Adjustment Distribution')
-                plt.xlabel('Adjustment Factor')
-                plt.ylabel('Frequency')
-                plt.xticks(x, factor_labels, rotation=45)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-            else:
-                plt.text(0.5, 0.5, "Insufficient band data for comparison", ha='center', va='center')
-                plt.title('Band-Specific Adjustment Distribution')
-        else:
-            plt.text(0.5, 0.5, "No band data available", ha='center', va='center')
-            plt.title('Band-Specific Adjustment Distribution')
+        band_avgs = []
+        bands = []
         
-        # Plot 8: Pattern-specific adjustment distributions
-        plt.subplot(4, 3, 8)
-        if 'pattern_type' in adjustments_df.columns and len(adjustments_df['pattern_type'].unique()) > 1:
-            # Count patterns
-            patterns = [p for p in adjustments_df['pattern_type'].unique() if p != "unknown"]
-            if patterns and len(patterns) <= 3:  # Limit to 3 patterns for readability
-                # Set up X positions
-                x = np.arange(len(self.agent.adjustment_factors))
-                width = 0.8 / len(patterns)
-                
-                for i, pattern in enumerate(patterns):
-                    pattern_df = adjustments_df[adjustments_df['pattern_type'] == pattern]
-                    # Count by action index
-                    counts = np.zeros(len(self.agent.adjustment_factors))
-                    for action_idx in range(len(self.agent.adjustment_factors)):
-                        counts[action_idx] = len(pattern_df[pattern_df['action_idx'] == action_idx])
-                    
-                    # Convert to percentages
-                    if sum(counts) > 0:
-                        counts = counts / sum(counts)
-                    
-                    # Plot with offset for each pattern
-                    offset = (i - len(patterns)/2 + 0.5) * width
-                    plt.bar(x + offset, counts, width, label=pattern)
-                
-                plt.title('Pattern-Specific Adjustment Distribution')
-                plt.xlabel('Adjustment Factor')
-                plt.ylabel('Frequency')
-                plt.xticks(x, factor_labels, rotation=45)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-            else:
-                plt.text(0.5, 0.5, "Too many patterns for visualization", ha='center', va='center')
-                plt.title('Pattern-Specific Adjustment Distribution')
-        else:
-            plt.text(0.5, 0.5, "No pattern data available", ha='center', va='center')
-            plt.title('Pattern-Specific Adjustment Distribution')
-        
-        # Plot 9: Holiday vs Non-Holiday comparison
-        plt.subplot(4, 3, 9)
-        if 'is_holiday' in adjustments_df.columns:
-            holiday_df = adjustments_df[adjustments_df['is_holiday'] == True]
-            non_holiday_df = adjustments_df[adjustments_df['is_holiday'] == False]
-            
-            if len(holiday_df) > 0 and len(non_holiday_df) > 0:
-                # Group by action index for each category
-                holiday_counts = np.zeros(len(self.agent.adjustment_factors))
-                non_holiday_counts = np.zeros(len(self.agent.adjustment_factors))
-                
-                for action_idx in range(len(self.agent.adjustment_factors)):
-                    holiday_counts[action_idx] = len(holiday_df[holiday_df['action_idx'] == action_idx])
-                    non_holiday_counts[action_idx] = len(non_holiday_df[non_holiday_df['action_idx'] == action_idx])
-                
-                # Convert to percentages
-                if sum(holiday_counts) > 0:
-                    holiday_counts = holiday_counts / sum(holiday_counts)
-                if sum(non_holiday_counts) > 0:
-                    non_holiday_counts = non_holiday_counts / sum(non_holiday_counts)
-                
-                # Set up plot
-                x = np.arange(len(self.agent.adjustment_factors))
-                width = 0.35
-                
-                plt.bar(x - width/2, non_holiday_counts, width, label='Non-Holiday')
-                plt.bar(x + width/2, holiday_counts, width, label='Holiday')
-                
-                plt.title('Holiday vs Non-Holiday Adjustments')
-                plt.xlabel('Adjustment Factor')
-                plt.ylabel('Frequency')
-                plt.xticks(x, factor_labels, rotation=45)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-            else:
-                plt.text(0.5, 0.5, "Insufficient holiday data for comparison", ha='center', va='center')
-                plt.title('Holiday vs Non-Holiday Adjustments')
-        else:
-            plt.text(0.5, 0.5, "No holiday data available", ha='center', va='center')
-            plt.title('Holiday vs Non-Holiday Adjustments')
-        
-        # Plot 10: Promotion vs Non-Promotion comparison
-        plt.subplot(4, 3, 10)
-        if 'is_promotion' in adjustments_df.columns:
-            promo_df = adjustments_df[adjustments_df['is_promotion'] == True]
-            non_promo_df = adjustments_df[adjustments_df['is_promotion'] == False]
-            
-            if len(promo_df) > 0 and len(non_promo_df) > 0:
-                # Group by action index for each category
-                promo_counts = np.zeros(len(self.agent.adjustment_factors))
-                non_promo_counts = np.zeros(len(self.agent.adjustment_factors))
-                
-                for action_idx in range(len(self.agent.adjustment_factors)):
-                    promo_counts[action_idx] = len(promo_df[promo_df['action_idx'] == action_idx])
-                    non_promo_counts[action_idx] = len(non_promo_df[non_promo_df['action_idx'] == action_idx])
-                
-                # Convert to percentages
-                if sum(promo_counts) > 0:
-                    promo_counts = promo_counts / sum(promo_counts)
-                if sum(non_promo_counts) > 0:
-                    non_promo_counts = non_promo_counts / sum(non_promo_counts)
-                
-                # Set up plot
-                x = np.arange(len(self.agent.adjustment_factors))
-                width = 0.35
-                
-                plt.bar(x - width/2, non_promo_counts, width, label='Non-Promotion')
-                plt.bar(x + width/2, promo_counts, width, label='Promotion')
-                
-                plt.title('Promotion vs Non-Promotion Adjustments')
-                plt.xlabel('Adjustment Factor')
-                plt.ylabel('Frequency')
-                plt.xticks(x, factor_labels, rotation=45)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-            else:
-                plt.text(0.5, 0.5, "Insufficient promotion data for comparison", ha='center', va='center')
-                plt.title('Promotion vs Non-Promotion Adjustments')
-        else:
-            plt.text(0.5, 0.5, "No promotion data available", ha='center', va='center')
-            plt.title('Promotion vs Non-Promotion Adjustments')
-        
-        # Plot 11: SKU band comparison for holidays and weekends
-        plt.subplot(4, 3, 11)
-        if ('sku_band' in adjustments_df.columns and 
-            'is_holiday' in adjustments_df.columns and 
-            'is_weekend' in adjustments_df.columns):
-            
-            # Fast vs slow selling bands on special days
-            high_band = 'A'
-            low_band = 'E'
-            
-            # Filter data
-            high_special = adjustments_df[(adjustments_df['sku_band'] == high_band) & 
-                                         ((adjustments_df['is_holiday'] == True) | 
-                                          (adjustments_df['is_weekend'] == True))]
-            
-            low_special = adjustments_df[(adjustments_df['sku_band'] == low_band) & 
-                                        ((adjustments_df['is_holiday'] == True) | 
-                                         (adjustments_df['is_weekend'] == True))]
-            
-            high_regular = adjustments_df[(adjustments_df['sku_band'] == high_band) & 
-                                         (adjustments_df['is_holiday'] == False) & 
-                                         (adjustments_df['is_weekend'] == False)]
-            
-            low_regular = adjustments_df[(adjustments_df['sku_band'] == low_band) & 
-                                        (adjustments_df['is_holiday'] == False) & 
-                                        (adjustments_df['is_weekend'] == False)]
-            
-            # Check if we have enough data for each category
-            categories = []
-            values = []
-            
-            if len(high_special) > 0:
-                categories.append(f"{high_band} Special")
-                values.append(high_special['adjustment_factor'].mean())
-                
-            if len(high_regular) > 0:
-                categories.append(f"{high_band} Regular")
-                values.append(high_regular['adjustment_factor'].mean())
-                
-            if len(low_special) > 0:
-                categories.append(f"{low_band} Special")
-                values.append(low_special['adjustment_factor'].mean())
-                
-            if len(low_regular) > 0:
-                categories.append(f"{low_band} Regular")
-                values.append(low_regular['adjustment_factor'].mean())
-            
-            if len(categories) >= 2:  # Need at least two categories to compare
-                colors = ['darkred', 'lightcoral', 'darkblue', 'lightblue'][:len(categories)]
-                plt.bar(categories, values, color=colors)
-                plt.title(f'Band Comparison: Special vs Regular Days')
-                plt.ylabel('Avg Adjustment Factor')
-                plt.grid(True, alpha=0.3)
-                
-                # Add value labels
-                for i, v in enumerate(values):
-                    plt.text(i, v + 0.01, f"{v:.2f}", ha='center')
-            else:
-                plt.text(0.5, 0.5, "Insufficient data for comparison", ha='center', va='center')
-                plt.title('Band Comparison: Special vs Regular Days')
-        else:
-            plt.text(0.5, 0.5, "Missing required data for comparison", ha='center', va='center')
-            plt.title('Band Comparison: Special vs Regular Days')
-        
-        # Plot 12: Original vs Adjusted total forecast volume by band
-        plt.subplot(4, 3, 12)
         if 'sku_band' in adjustments_df.columns:
-            # Group by band and calculate total original and adjusted forecast
-            band_totals = adjustments_df.groupby('sku_band').agg({
-                'original_forecast': 'sum',
-                'adjusted_forecast': 'sum'
-            }).reset_index()
+            for band in sorted(adjustments_df['sku_band'].unique()):
+                band_df = adjustments_df[adjustments_df['sku_band'] == band]
+                if len(band_df) > 0:
+                    bands.append(band)
+                    band_avgs.append(band_df['adjustment_factor'].mean())
+        
+        if bands:
+            plt.bar(bands, band_avgs, color=['blue', 'green', 'gray', 'orange', 'red'][:len(bands)])
+            plt.title('Average Adjustment Factor by SKU Band')
+            plt.ylabel('Avg Factor')
+            plt.grid(True, alpha=0.3)
             
-            if not band_totals.empty:
-                bands = band_totals['sku_band'].tolist()
-                orig_totals = band_totals['original_forecast'].tolist()
-                adj_totals = band_totals['adjusted_forecast'].tolist()
-                
-                x = np.arange(len(bands))
-                width = 0.35
-                
-                plt.bar(x - width/2, orig_totals, width, label='Original', color='royalblue')
-                plt.bar(x + width/2, adj_totals, width, label='Adjusted', color='tomato')
-                
-                plt.title('Total Forecast Volume by Band')
-                plt.xlabel('SKU Band')
-                plt.ylabel('Total Volume')
-                plt.xticks(x, bands)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-                
-                # Add percentage change labels
-                for i, (orig, adj) in enumerate(zip(orig_totals, adj_totals)):
-                    pct_change = ((adj - orig) / orig * 100) if orig > 0 else 0
-                    plt.text(i, max(orig, adj) + 0.05 * max(orig_totals + adj_totals), 
-                            f"{pct_change:.1f}%", ha='center')
-            else:
-                plt.text(0.5, 0.5, "Insufficient data for comparison", ha='center', va='center')
-                plt.title('Total Forecast Volume by Band')
-        else:
-            plt.text(0.5, 0.5, "No band data available", ha='center', va='center')
-            plt.title('Total Forecast Volume by Band')
+            # Add value labels
+            for i, v in enumerate(band_avgs):
+                plt.text(i, v + 0.01, f"{v:.2f}", ha='center')
+        
+        # Plot 4: Pattern-specific adjustments
+        plt.subplot(2, 2, 4)
+        
+        pattern_avgs = []
+        patterns = []
+        
+        if 'pattern_type' in adjustments_df.columns:
+            for pattern in adjustments_df['pattern_type'].unique():
+                if pattern != "unknown":
+                    pattern_df = adjustments_df[adjustments_df['pattern_type'] == pattern]
+                    if len(pattern_df) > 0:
+                        patterns.append(pattern)
+                        pattern_avgs.append(pattern_df['adjustment_factor'].mean())
+        
+        if patterns:
+            plt.bar(patterns, pattern_avgs)
+            plt.title('Average Adjustment Factor by Pattern Type')
+            plt.ylabel('Avg Factor')
+            plt.xticks(rotation=45)
+            plt.grid(True, alpha=0.3)
+            
+            # Add value labels
+            for i, v in enumerate(pattern_avgs):
+                plt.text(i, v + 0.01, f"{v:.2f}", ha='center')
         
         plt.tight_layout()
-        plt.savefig(os.path.join(self.log_dir, "forecast_adjustments_summary.png"))
+        plt.savefig(os.path.join(self.log_dir, 'forecast_adjustments.png'))
         plt.close()
+    
+    def _plot_pattern_learning(self):
+        """Create plot showing pattern-specific learning curves."""
+        if not self.pattern_metrics:
+            return  # No pattern data to plot
+        
+        plt.figure(figsize=(16, 12))
+        
+        # Plot pattern-specific MAPE improvements
+        plt.subplot(2, 2, 1)
+        for pattern, metrics in self.pattern_metrics.items():
+            plt.plot(metrics['mape_improvements'], label=pattern)
+        plt.title('Pattern-Specific MAPE Improvement')
+        plt.xlabel('Episode')
+        plt.ylabel('Improvement Ratio')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot pattern-specific scores
+        plt.subplot(2, 2, 2)
+        for pattern, metrics in self.pattern_metrics.items():
+            plt.plot(metrics['scores'], label=pattern)
+        plt.title('Pattern-Specific Rewards')
+        plt.xlabel('Episode')
+        plt.ylabel('Average Reward')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot average MAPE improvement by pattern (last 100 episodes)
+        plt.subplot(2, 2, 3)
+        window = min(100, len(next(iter(self.pattern_metrics.values()))['mape_improvements']))
+        pattern_avgs = []
+        pattern_names = []
+        
+        for pattern, metrics in self.pattern_metrics.items():
+            avg_imp = np.mean(metrics['mape_improvements'][-window:])
+            pattern_avgs.append(avg_imp)
+            pattern_names.append(pattern)
+        
+        plt.bar(pattern_names, pattern_avgs)
+        plt.title(f'Avg MAPE Improvement by Pattern (Last {window} Episodes)')
+        plt.ylabel('Improvement Ratio')
+        plt.xticks(rotation=45)
+        
+        # Plot moving average of each pattern's MAPE improvement
+        plt.subplot(2, 2, 4)
+        window_size = 25
+        for pattern, metrics in self.pattern_metrics.items():
+            if len(metrics['mape_improvements']) >= window_size:
+                moving_avg = np.convolve(metrics['mape_improvements'], np.ones(window_size)/window_size, mode='valid')
+                plt.plot(range(window_size-1, len(metrics['mape_improvements'])), moving_avg, label=pattern)
+        plt.title(f'Moving Average ({window_size} episodes) MAPE Improvement')
+        plt.xlabel('Episode')
+        plt.ylabel('Improvement Ratio')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.log_dir, 'pattern_learning.png'))
+        plt.close()
+    
+    def _plot_band_learning(self):
+        """Create plot showing band-specific learning curves."""
+        plt.figure(figsize=(16, 12))
+        
+        # Plot band-specific MAPE improvements
+        plt.subplot(2, 2, 1)
+        for band in ['A', 'B', 'C', 'D', 'E']:
+            plt.plot(self.band_metrics[band]['mape_improvements'], label=f'Band {band}')
+        plt.title('Band-Specific MAPE Improvement')
+        plt.xlabel('Episode')
+        plt.ylabel('Improvement Ratio')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot band-specific bias improvements
+        plt.subplot(2, 2, 2)
+        for band in ['A', 'B', 'C', 'D', 'E']:
+            plt.plot(self.band_metrics[band]['bias_improvements'], label=f'Band {band}')
+        plt.title('Band-Specific Bias Improvement')
+        plt.xlabel('Episode')
+        plt.ylabel('Improvement Ratio')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot average MAPE improvement by band (last 100 episodes)
+        plt.subplot(2, 2, 3)
+        window = min(100, len(self.band_metrics['A']['mape_improvements']))
+        bands = ['A', 'B', 'C', 'D', 'E']
+        band_avgs = []
+        
+        for band in bands:
+            avg_imp = np.mean(self.band_metrics[band]['mape_improvements'][-window:])
+            band_avgs.append(avg_imp)
+        
+        plt.bar(bands, band_avgs)
+        plt.title(f'Avg MAPE Improvement by Band (Last {window} Episodes)')
+        plt.ylabel('Improvement Ratio')
+        
+        # Plot average Bias improvement by band (last 100 episodes)
+        plt.subplot(2, 2, 4)
+        window = min(100, len(self.band_metrics['A']['bias_improvements']))
+        bands = ['A', 'B', 'C', 'D', 'E']
+        band_bias_avgs = []
+        
+        for band in bands:
+            avg_imp = np.mean(self.band_metrics[band]['bias_improvements'][-window:])
+            band_bias_avgs.append(avg_imp)
+        
+        plt.bar(bands, band_bias_avgs)
+        plt.title(f'Avg Bias Improvement by Band (Last {window} Episodes)')
+        plt.ylabel('Improvement Ratio')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.log_dir, 'band_learning.png'))
+        plt.close()
+    
+    def evaluate(self, num_episodes: int = 10, verbose: bool = True) -> Dict:
+        """
+        Evaluate the forecast adjustment agent with context-specific metrics.
+        
+        Args:
+            num_episodes: Number of episodes to evaluate
+            verbose: Whether to print progress
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        self.logger.info(f"Starting evaluation for {num_episodes} episodes")
+        
+        # Evaluation metrics
+        eval_scores = []
+        eval_mape_improvements = []
+        eval_bias_improvements = []
+        
+        # Context-specific metrics
+        context_metrics = {
+            'holiday': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'promotion': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'weekend': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'weekday': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0}
+        }
+        
+        # Band-specific metrics
+        band_metrics = {
+            'A': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'B': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'C': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'D': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'E': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0}
+        }
+        
+        # Store current agent state
+        original_epsilon = self.agent.epsilon
+        self.agent.epsilon = 0  # Turn off exploration for evaluation
+        
+        # Evaluation loop
+        for episode in range(1, num_episodes + 1):
+            state = self.env.reset()
+            episode_score = 0
+            
+            # Track metrics for this episode
+            original_mapes = []
+            adjusted_mapes = []
+            original_biases = []
+            adjusted_biases = []
+            
+            for step in range(self.max_steps):
+                adjustments = {}
+                
+                # Get actions for all SKUs (no exploration)
+                for i, sku in enumerate(self.env.skus):
+                    # Get feature dimensions
+                    feature_dims = self.env.get_feature_dims()
+                    
+                    # Extract context features
+                    context_features = self._extract_context_features(state[i], feature_dims)
+                    sku_band = context_features.get('sku_band', 'C')
+                    
+                    # Create context dictionary
+                    context = {
+                        'is_holiday': False,  # Will be set after env step
+                        'is_promotion': False,  # Will be set after env step
+                        'is_weekend': context_features.get('is_weekend', False),
+                        'sku_band': sku_band
+                    }
+                    
+                    # Get action (no exploration)
+                    action_idx = self.agent.act(state[i], explore=False, context=context)
+                    
+                    # Calculate adjusted forecast
+                    forecast = state[i][0]  # First value is the current forecast
+                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, forecast, context)
+                    
+                    adjustments[sku] = (action_idx, adjusted_forecast)
+                
+                # Take step in environment
+                next_state, rewards, done, info = self.env.step(adjustments)
+                
+                # Update metrics
+                episode_score += sum(rewards.values())
+                
+                # Track MAPE and bias
+                for sku in self.env.skus:
+                    original_mapes.append(info['original_mape'][sku])
+                    adjusted_mapes.append(info['adjusted_mape'][sku])
+                    original_biases.append(abs(info['original_bias'][sku]))
+                    adjusted_biases.append(abs(info['adjusted_bias'][sku]))
+                
+                state = next_state
+                if done:
+                    break
+            
+            # Calculate episode metrics
+            avg_original_mape = np.mean(original_mapes)
+            avg_adjusted_mape = np.mean(adjusted_mapes)
+            avg_original_bias = np.mean(original_biases)
+            avg_adjusted_bias = np.mean(adjusted_biases)
+            
+            # Calculate improvements
+            mape_improvement = (avg_original_mape - avg_adjusted_mape) / avg_original_mape if avg_original_mape > 0 else 0
+            bias_improvement = (avg_original_bias - avg_adjusted_bias) / avg_original_bias if avg_original_bias > 0 else 0
+            
+            # Store metrics
+            eval_scores.append(episode_score)
+            eval_mape_improvements.append(mape_improvement)
+            eval_bias_improvements.append(bias_improvement)
+            
+            if verbose:
+                self.logger.info(f"Episode {episode}/{num_episodes} | Score: {episode_score:.2f} | MAPE Imp: {mape_improvement:.4f}")
+        
+        # Restore agent state
+        self.agent.epsilon = original_epsilon
+        
+        # Calculate aggregate metrics
+        avg_score = np.mean(eval_scores)
+        avg_mape_improvement = np.mean(eval_mape_improvements)
+        avg_bias_improvement = np.mean(eval_bias_improvements)
+        
+        # Approximate context-specific metrics from training data
+        context_metrics = {
+            'holiday': {
+                'avg_mape_improvement': np.mean(self.holiday_metrics['mape_improvements'][-50:]) if self.holiday_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.holiday_metrics['bias_improvements'][-50:]) if self.holiday_metrics['bias_improvements'] else 0
+            },
+            'promotion': {
+                'avg_mape_improvement': np.mean(self.promo_metrics['mape_improvements'][-50:]) if self.promo_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.promo_metrics['bias_improvements'][-50:]) if self.promo_metrics['bias_improvements'] else 0
+            },
+            'weekend': {
+                'avg_mape_improvement': np.mean(self.weekend_metrics['mape_improvements'][-50:]) if self.weekend_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.weekend_metrics['bias_improvements'][-50:]) if self.weekend_metrics['bias_improvements'] else 0
+            },
+            'weekday': {
+                'avg_mape_improvement': np.mean(self.weekday_metrics['mape_improvements'][-50:]) if self.weekday_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.weekday_metrics['bias_improvements'][-50:]) if self.weekday_metrics['bias_improvements'] else 0
+            }
+        }
+        
+        # Approximate band-specific metrics from training data
+        band_metrics = {}
+        for band in ['A', 'B', 'C', 'D', 'E']:
+            if band in self.band_metrics and self.band_metrics[band]['mape_improvements']:
+                band_metrics[band] = {
+                    'avg_mape_improvement': np.mean(self.band_metrics[band]['mape_improvements'][-50:]),
+                    'avg_bias_improvement': np.mean(self.band_metrics[band]['bias_improvements'][-50:])
+                }
+            else:
+                band_metrics[band] = {
+                    'avg_mape_improvement': 0,
+                    'avg_bias_improvement': 0
+                }
+        
+        metrics = {
+            'scores': eval_scores,
+            'mape_improvements': eval_mape_improvements,
+            'bias_improvements': eval_bias_improvements,
+            'avg_score': avg_score,
+            'avg_mape_improvement': avg_mape_improvement,
+            'avg_bias_improvement': avg_bias_improvement,
+            'context_metrics': context_metrics,
+            'band_metrics': band_metrics
+        }
+        
+        return metrics

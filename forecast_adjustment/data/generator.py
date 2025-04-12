@@ -1,46 +1,50 @@
 """
-Data Generator for Historical Forecast Training - Creates historical forecasts and actuals
-with clear patterns for training the forecast adjustment system.
+Data generator for forecast adjustment system.
+Creates synthetic forecast data with patterns for training and evaluation.
 """
 
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import logging
 import os
+import logging
+from typing import Dict, List, Optional, Tuple
 
 
-def generate_historical_forecast_dataset(
-    num_skus=20,
-    forecast_horizon=14,
-    historical_days=120,
-    start_date=None,
-    output_dir="data",
-    logger=None):
+def generate_forecast_dataset(
+    num_skus: int = 20,
+    forecast_horizon: int = 14,
+    historical_days: int = 120,
+    start_date: Optional[str] = None,
+    output_dir: str = "data",
+    include_bands: bool = True,
+    logger: Optional[logging.Logger] = None
+) -> Dict[str, pd.DataFrame]:
     """
-    Generate a dataset of historical forecasts and actuals with clear patterns for RL to learn.
+    Generate a dataset of historical forecasts and actuals with clear patterns for RL training.
     
     Args:
         num_skus: Number of SKUs to generate
         forecast_horizon: Number of days in each forecast horizon
         historical_days: Number of days of historical data to generate
-        start_date: Starting date (defaults to 120 days ago)
+        start_date: Starting date (defaults to historical_days ago)
         output_dir: Directory to save data
+        include_bands: Whether to generate and assign SKU bands (A-E)
         logger: Logger instance
         
     Returns:
-        Tuple of (forecast_data, actual_data, holiday_data, promotion_data)
+        Dictionary containing forecast_data, actual_data, holiday_data, promotion_data, and sku_band_data
     """
     if logger is None:
         logger = logging.getLogger("DataGenerator")
         
-    logger.info(f"Generating historical forecast dataset with {num_skus} SKUs over {historical_days} days")
+    logger.info(f"Generating forecast dataset with {num_skus} SKUs over {historical_days} days")
     
     if start_date is None:
         # Default to historical_days ago
-        start_date = datetime.now() - timedelta(days=historical_days)
-    else:
-        start_date = pd.to_datetime(start_date)
+        start_date = (datetime.now() - timedelta(days=historical_days)).strftime("%Y-%m-%d")
+    
+    start_date = pd.to_datetime(start_date)
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -73,7 +77,92 @@ def generate_historical_forecast_dataset(
     
     logger.info(f"Created SKUs with patterns: {underbias_count} underbias, {promo_count} promo/holiday, {dow_count} day pattern")
     
-    # Generate holiday data first so we can reference it when generating forecasts
+    # Generate holiday data
+    holiday_records = _generate_holiday_data(start_date, historical_days)
+    
+    # Create holiday DataFrame
+    holiday_df = pd.DataFrame(holiday_records)
+    
+    # Create a set of holiday dates for easy lookup
+    holiday_dates = set(holiday_df['date'])
+    
+    # Generate promotion data
+    promo_records = _generate_promotion_data(skus, sku_patterns, start_date, historical_days)
+    
+    # Create promotion DataFrame
+    promo_df = pd.DataFrame(promo_records)
+    
+    # Generate SKU band data if requested
+    sku_band_df = None
+    if include_bands:
+        sku_band_records = _generate_sku_bands(skus, sku_patterns)
+        sku_band_df = pd.DataFrame(sku_band_records)
+    
+    # Generate true demand patterns
+    true_demand = _generate_true_demand(
+        skus, 
+        sku_patterns, 
+        start_date, 
+        historical_days, 
+        forecast_horizon, 
+        holiday_dates, 
+        promo_df
+    )
+    
+    # Generate forecast data with clear, learnable biases
+    forecast_records, actual_records = _generate_forecast_actual_data(
+        skus,
+        sku_patterns,
+        true_demand,
+        start_date,
+        historical_days,
+        forecast_horizon,
+        holiday_dates,
+        promo_df
+    )
+    
+    # Create forecast DataFrame
+    forecast_df = pd.DataFrame(forecast_records)
+    
+    # Create actual DataFrame
+    actual_df = pd.DataFrame(actual_records)
+    
+    # Save datasets to CSV
+    forecast_df.to_csv(os.path.join(output_dir, 'historical_forecasts.csv'), index=False)
+    actual_df.to_csv(os.path.join(output_dir, 'historical_actuals.csv'), index=False)
+    holiday_df.to_csv(os.path.join(output_dir, 'holidays.csv'), index=False)
+    promo_df.to_csv(os.path.join(output_dir, 'promotions.csv'), index=False)
+    
+    if sku_band_df is not None:
+        sku_band_df.to_csv(os.path.join(output_dir, 'sku_bands.csv'), index=False)
+    
+    # Save SKU patterns for analysis
+    sku_pattern_df = pd.DataFrame([
+        {'sku_id': sku, 'pattern_type': pattern} 
+        for sku, pattern in sku_patterns.items()
+    ])
+    sku_pattern_df.to_csv(os.path.join(output_dir, 'sku_patterns.csv'), index=False)
+    
+    logger.info(f"Generated {len(forecast_df)} historical forecasts for {len(skus)} SKUs")
+    logger.info(f"Generated {len(actual_df)} actual values for {len(skus)} SKUs")
+    logger.info(f"Generated {len(holiday_df)} holidays")
+    logger.info(f"Generated {len(promo_df)} promotions")
+    
+    result = {
+        'forecast': forecast_df,
+        'historical': actual_df,
+        'holiday': holiday_df,
+        'promotion': promo_df
+    }
+    
+    if sku_band_df is not None:
+        result['sku_band'] = sku_band_df
+    
+    return result
+
+
+def _generate_holiday_data(start_date: pd.Timestamp, historical_days: int) -> List[Dict]:
+    """Generate synthetic holiday data."""
     holiday_records = []
     
     # Create holidays approximately once a month
@@ -94,14 +183,17 @@ def generate_historical_forecast_dataset(
             'date': date.strftime('%Y-%m-%d'),
             'holiday_name': holiday_names[i % len(holiday_names)]
         })
-    
-    # Create holiday DataFrame
-    holiday_df = pd.DataFrame(holiday_records)
-    
-    # Create a set of holiday dates for easy lookup
-    holiday_dates = set(holiday_df['date'])
-    
-    # Generate promotion data
+        
+    return holiday_records
+
+
+def _generate_promotion_data(
+    skus: List[str], 
+    sku_patterns: Dict[str, str], 
+    start_date: pd.Timestamp, 
+    historical_days: int
+) -> List[Dict]:
+    """Generate synthetic promotion data."""
     promo_records = []
     
     # Assign promotions to all SKUs with promo_holiday pattern and some underbias SKUs
@@ -130,11 +222,64 @@ def generate_historical_forecast_dataset(
                 'end_date': end_date_promo.strftime('%Y-%m-%d'),
                 'promo_type': np.random.choice(["Price Discount", "BOGO", "Bundle"])
             })
+            
+    return promo_records
+
+
+def _generate_sku_bands(skus: List[str], sku_patterns: Dict[str, str]) -> List[Dict]:
+    """Generate SKU band assignments based on patterns and with some randomness."""
+    sku_band_records = []
     
-    # Create promotion DataFrame
-    promo_df = pd.DataFrame(promo_records)
+    # Base band assignment on pattern type and add some randomness
+    for sku in skus:
+        pattern = sku_patterns[sku]
+        
+        # Assign probability distributions based on pattern
+        if pattern == "promo_holiday":
+            # Promo/holiday SKUs tend to be higher volume
+            band_probs = {'A': 0.3, 'B': 0.4, 'C': 0.2, 'D': 0.07, 'E': 0.03}
+        elif pattern == "underbias":
+            # Underbias can happen across any band
+            band_probs = {'A': 0.15, 'B': 0.25, 'C': 0.3, 'D': 0.2, 'E': 0.1}
+        else:  # day_pattern
+            # Day patterns are common for medium volume items
+            band_probs = {'A': 0.1, 'B': 0.2, 'C': 0.4, 'D': 0.2, 'E': 0.1}
+        
+        # Sample a band based on the probabilities
+        bands = list(band_probs.keys())
+        probabilities = list(band_probs.values())
+        band = np.random.choice(bands, p=probabilities)
+        
+        # Add the band assignment and a base volume
+        volume_ranges = {
+            'A': (5000, 10000),  # High volume
+            'B': (1000, 5000),   # Above average
+            'C': (500, 1000),    # Average
+            'D': (100, 500),     # Below average
+            'E': (10, 100)       # Low volume
+        }
+        
+        base_volume = np.random.randint(*volume_ranges[band])
+        
+        sku_band_records.append({
+            'sku_id': sku,
+            'band': band,
+            'base_volume': base_volume
+        })
     
-    # Generate true demand patterns
+    return sku_band_records
+
+
+def _generate_true_demand(
+    skus: List[str],
+    sku_patterns: Dict[str, str],
+    start_date: pd.Timestamp,
+    historical_days: int,
+    forecast_horizon: int,
+    holiday_dates: set,
+    promo_df: pd.DataFrame
+) -> Dict[str, np.ndarray]:
+    """Generate true demand patterns for SKUs."""
     true_demand = {}
     for sku in skus:
         pattern_type = sku_patterns[sku]
@@ -204,10 +349,25 @@ def generate_historical_forecast_dataset(
             demand[day] = max(0, round(value + noise))
         
         true_demand[sku] = demand
+        
+    return true_demand
+
+
+def _generate_forecast_actual_data(
+    skus: List[str],
+    sku_patterns: Dict[str, str],
+    true_demand: Dict[str, np.ndarray],
+    start_date: pd.Timestamp,
+    historical_days: int,
+    forecast_horizon: int,
+    holiday_dates: set,
+    promo_df: pd.DataFrame
+) -> Tuple[List[Dict], List[Dict]]:
+    """Generate forecast and actual data with clear patterns."""
+    forecast_records = []
+    actual_records = []
     
     # Generate forecast data with clear, learnable biases
-    forecast_records = []
-    
     for day in range(historical_days - forecast_horizon):
         forecast_date = start_date + timedelta(days=day)
         
@@ -301,12 +461,7 @@ def generate_historical_forecast_dataset(
             
             forecast_records.append(row)
     
-    # Create forecast DataFrame
-    forecast_df = pd.DataFrame(forecast_records)
-    
     # Generate actual data
-    actual_records = []
-    
     for day in range(historical_days):
         date = start_date + timedelta(days=day)
         
@@ -322,25 +477,4 @@ def generate_historical_forecast_dataset(
                     'pattern_type': sku_patterns[sku]  # Store pattern type for analysis
                 })
     
-    # Create actual DataFrame
-    actual_df = pd.DataFrame(actual_records)
-    
-    # Save SKU patterns for analysis
-    sku_pattern_df = pd.DataFrame([
-        {'sku_id': sku, 'pattern_type': pattern} 
-        for sku, pattern in sku_patterns.items()
-    ])
-    sku_pattern_df.to_csv(os.path.join(output_dir, 'sku_patterns.csv'), index=False)
-    
-    # Save datasets to CSV
-    forecast_df.to_csv(os.path.join(output_dir, 'historical_forecasts.csv'), index=False)
-    actual_df.to_csv(os.path.join(output_dir, 'historical_actuals.csv'), index=False)
-    holiday_df.to_csv(os.path.join(output_dir, 'holidays.csv'), index=False)
-    promo_df.to_csv(os.path.join(output_dir, 'promotions.csv'), index=False)
-    
-    logger.info(f"Generated {len(forecast_df)} historical forecasts for {len(skus)} SKUs")
-    logger.info(f"Generated {len(actual_df)} actual values for {len(skus)} SKUs")
-    logger.info(f"Generated {len(holiday_df)} holidays")
-    logger.info(f"Generated {len(promo_df)} promotions")
-    
-    return forecast_df, actual_df, holiday_df, promo_df
+    return forecast_records, actual_records

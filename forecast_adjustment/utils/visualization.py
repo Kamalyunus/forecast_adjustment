@@ -1,586 +1,388 @@
 """
-Visualization Utilities - Functions for visualizing forecast adjustments and 
-demonstrating learning patterns.
+Visualization utilities for forecast adjustment system.
 """
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 
 
-def visualize_sku_improvements(
-    original_forecasts: pd.DataFrame,
-    adjusted_forecasts: pd.DataFrame,
-    actuals: pd.DataFrame,
-    sku_patterns: Dict[str, str],
-    holiday_data: Optional[pd.DataFrame] = None,
-    promotion_data: Optional[pd.DataFrame] = None,
+def visualize_adjustments(
+    adjustments_df: pd.DataFrame,
     output_dir: str = "output/visualizations",
     logger: Optional[logging.Logger] = None
-):
+) -> None:
     """
-    Generate visualizations showing how the RL agent improved forecasts for different pattern types.
+    Create visualizations of forecast adjustments.
     
     Args:
-        original_forecasts: DataFrame with original ML forecasts
-        adjusted_forecasts: DataFrame with RL-adjusted forecasts
-        actuals: DataFrame with actual values
-        sku_patterns: Dictionary mapping SKUs to their pattern types
-        holiday_data: Optional DataFrame with holiday information
-        promotion_data: Optional DataFrame with promotion information
+        adjustments_df: DataFrame of adjustment data
+        output_dir: Directory to save visualizations
+        logger: Optional logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger("Visualization")
+        
+    os.makedirs(output_dir, exist_ok=True)
+    
+    logger.info("Generating forecast adjustment visualizations")
+    
+    # Create visualizations
+    plt.figure(figsize=(20, 15))
+    
+    # Plot 1: Adjustment Factor Distribution
+    plt.subplot(2, 2, 1)
+    adjustment_factors = sorted(adjustments_df['adjustment_factor'].unique())
+    plt.hist(adjustments_df['adjustment_factor'], bins=20, alpha=0.75)
+    plt.title('Adjustment Factor Distribution')
+    plt.xlabel('Adjustment Factor')
+    plt.ylabel('Count')
+    plt.grid(True, alpha=0.3)
+    
+    # Plot 2: Day of Week Patterns
+    plt.subplot(2, 2, 2)
+    if 'day_of_week' in adjustments_df.columns:
+        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        
+        # Group by day of week
+        dow_factors = {}
+        for i, day in enumerate(day_names):
+            day_data = adjustments_df[adjustments_df['day_of_week'] == i]
+            if not day_data.empty:
+                dow_factors[day] = day_data['adjustment_factor'].mean()
+        
+        plt.bar(dow_factors.keys(), dow_factors.values())
+        plt.title('Average Adjustment Factor by Day of Week')
+        plt.ylabel('Avg Adjustment Factor')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+    
+    # Plot 3: Context Comparison
+    plt.subplot(2, 2, 3)
+    contexts = []
+    avg_factors = []
+    
+    # Overall average
+    avg_factor = adjustments_df['adjustment_factor'].mean()
+    contexts.append('Overall')
+    avg_factors.append(avg_factor)
+    
+    # Holiday average
+    if 'is_holiday' in adjustments_df.columns:
+        holiday_df = adjustments_df[adjustments_df['is_holiday'] == True]
+        if not holiday_df.empty:
+            holiday_avg = holiday_df['adjustment_factor'].mean()
+            contexts.append('Holiday')
+            avg_factors.append(holiday_avg)
+    
+    # Promotion average
+    if 'is_promotion' in adjustments_df.columns:
+        promo_df = adjustments_df[adjustments_df['is_promotion'] == True]
+        if not promo_df.empty:
+            promo_avg = promo_df['adjustment_factor'].mean()
+            contexts.append('Promotion')
+            avg_factors.append(promo_avg)
+    
+    # Weekend average
+    if 'is_weekend' in adjustments_df.columns:
+        weekend_df = adjustments_df[adjustments_df['is_weekend'] == True]
+        if not weekend_df.empty:
+            weekend_avg = weekend_df['adjustment_factor'].mean()
+            contexts.append('Weekend')
+            avg_factors.append(weekend_avg)
+    
+    plt.bar(contexts, avg_factors)
+    plt.title('Average Adjustment by Context')
+    plt.ylabel('Avg Adjustment Factor')
+    plt.grid(True, alpha=0.3)
+    
+    # Plot 4: Pattern Type Comparison
+    plt.subplot(2, 2, 4)
+    if 'pattern_type' in adjustments_df.columns:
+        pattern_avgs = {}
+        for pattern in adjustments_df['pattern_type'].unique():
+            if pattern != "unknown":
+                pattern_df = adjustments_df[adjustments_df['pattern_type'] == pattern]
+                if not pattern_df.empty:
+                    pattern_avgs[pattern] = pattern_df['adjustment_factor'].mean()
+        
+        if pattern_avgs:
+            plt.bar(pattern_avgs.keys(), pattern_avgs.values())
+            plt.title('Average Adjustment by Pattern Type')
+            plt.ylabel('Avg Adjustment Factor')
+            plt.xticks(rotation=45)
+            plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'adjustment_analysis.png'))
+    plt.close()
+    
+    # Create band-specific visualizations if available
+    if 'sku_band' in adjustments_df.columns:
+        plot_band_comparison(adjustments_df, output_dir, logger)
+    
+    logger.info(f"Saved visualizations to {output_dir}")
+
+
+def plot_training_metrics(
+    metrics: Dict,
+    output_dir: str = "output/visualizations",
+    logger: Optional[logging.Logger] = None
+) -> None:
+    """
+    Plot training metrics from a training run.
+    
+    Args:
+        metrics: Dictionary of training metrics
+        output_dir: Directory to save visualizations
+        logger: Optional logger instance
+    """
+    if logger is None:
+        logger = logging.getLogger("Visualization")
+        
+    os.makedirs(output_dir, exist_ok=True)
+    
+    logger.info("Generating training metrics visualizations")
+    
+    # Create visualizations
+    plt.figure(figsize=(15, 10))
+    
+    # Plot 1: MAPE Improvement
+    plt.subplot(2, 2, 1)
+    plt.plot(metrics['mape_improvements'])
+    plt.title('MAPE Improvement Over Time')
+    plt.xlabel('Episode')
+    plt.ylabel('Improvement Ratio')
+    plt.grid(True, alpha=0.3)
+    
+    # Add moving average
+    if len(metrics['mape_improvements']) > 10:
+        window_size = 10
+        moving_avg = np.convolve(metrics['mape_improvements'], np.ones(window_size)/window_size, mode='valid')
+        plt.plot(range(window_size-1, len(metrics['mape_improvements'])), moving_avg, 'r-', label='Moving Avg')
+        plt.legend()
+    
+    # Plot 2: Bias Improvement
+    plt.subplot(2, 2, 2)
+    plt.plot(metrics['bias_improvements'])
+    plt.title('Bias Improvement Over Time')
+    plt.xlabel('Episode')
+    plt.ylabel('Improvement Ratio')
+    plt.grid(True, alpha=0.3)
+    
+    # Add moving average
+    if len(metrics['bias_improvements']) > 10:
+        window_size = 10
+        moving_avg = np.convolve(metrics['bias_improvements'], np.ones(window_size)/window_size, mode='valid')
+        plt.plot(range(window_size-1, len(metrics['bias_improvements'])), moving_avg, 'r-', label='Moving Avg')
+        plt.legend()
+    
+    # Plot 3: Context-specific improvements
+    plt.subplot(2, 2, 3)
+    contexts = []
+    improvements = []
+    
+    # Overall
+    contexts.append('Overall')
+    improvements.append(np.mean(metrics['mape_improvements'][-50:]))
+    
+    # Context-specific
+    if 'holiday_metrics' in metrics and metrics['holiday_metrics'].get('mape_improvements'):
+        contexts.append('Holiday')
+        improvements.append(np.mean(metrics['holiday_metrics']['mape_improvements'][-50:]))
+    
+    if 'promo_metrics' in metrics and metrics['promo_metrics'].get('mape_improvements'):
+        contexts.append('Promo')
+        improvements.append(np.mean(metrics['promo_metrics']['mape_improvements'][-50:]))
+    
+    if 'weekend_metrics' in metrics and metrics['weekend_metrics'].get('mape_improvements'):
+        contexts.append('Weekend')
+        improvements.append(np.mean(metrics['weekend_metrics']['mape_improvements'][-50:]))
+    
+    plt.bar(contexts, improvements)
+    plt.title('MAPE Improvement by Context (Last 50 Episodes)')
+    plt.ylabel('Improvement Ratio')
+    plt.grid(True, alpha=0.3)
+    
+    # Plot 4: Band-specific improvements
+    plt.subplot(2, 2, 4)
+    if 'band_metrics' in metrics:
+        bands = []
+        band_improvements = []
+        
+        for band in ['A', 'B', 'C', 'D', 'E']:
+            if band in metrics['band_metrics'] and metrics['band_metrics'][band].get('mape_improvements'):
+                bands.append(band)
+                band_improvements.append(np.mean(metrics['band_metrics'][band]['mape_improvements'][-50:]))
+        
+        if bands:
+            plt.bar(bands, band_improvements)
+            plt.title('MAPE Improvement by SKU Band (Last 50 Episodes)')
+            plt.ylabel('Improvement Ratio')
+            plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'training_metrics.png'))
+    plt.close()
+    
+    logger.info(f"Saved training metrics visualizations to {output_dir}")
+
+
+def plot_band_comparison(
+    adjustments_df: pd.DataFrame,
+    output_dir: str = "output/visualizations",
+    logger: Optional[logging.Logger] = None
+) -> None:
+    """
+    Create band-specific comparison visualizations.
+    
+    Args:
+        adjustments_df: DataFrame of adjustment data with sku_band column
         output_dir: Directory to save visualizations
         logger: Optional logger instance
     """
     if logger is None:
         logger = logging.getLogger("Visualization")
     
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
+    if 'sku_band' not in adjustments_df.columns:
+        logger.warning("Cannot create band comparisons: 'sku_band' column not in data")
+        return
     
-    logger.info("Generating SKU improvement visualizations")
+    logger.info("Generating band comparison visualizations")
     
-    # Get column names for SKU ID (could be 'sku_id' or 'sku')
-    sku_col_orig = 'sku_id' if 'sku_id' in original_forecasts.columns else 'sku'
-    sku_col_adj = 'sku_id' if 'sku_id' in adjusted_forecasts.columns else 'sku'
-    sku_col_act = 'sku_id' if 'sku_id' in actuals.columns else 'sku'
+    plt.figure(figsize=(15, 12))
     
-    logger.info(f"Using SKU columns - Original: {sku_col_orig}, Adjusted: {sku_col_adj}, Actuals: {sku_col_act}")
+    # Plot 1: Average adjustment by band
+    plt.subplot(2, 2, 1)
+    band_avgs = {}
+    for band in sorted(adjustments_df['sku_band'].unique()):
+        band_df = adjustments_df[adjustments_df['sku_band'] == band]
+        if not band_df.empty:
+            band_avgs[band] = band_df['adjustment_factor'].mean()
     
-    # Process holiday data
-    holiday_dates = set()
-    if holiday_data is not None and not holiday_data.empty:
-        holiday_data['date'] = pd.to_datetime(holiday_data['date'])
-        holiday_dates = set(holiday_data['date'].dt.strftime('%Y-%m-%d'))
-    
-    # Process promotion data
-    sku_promotion_periods = {}
-    if promotion_data is not None and not promotion_data.empty:
-        promo_sku_col = 'sku_id' if 'sku_id' in promotion_data.columns else 'sku'
-        for _, row in promotion_data.iterrows():
-            sku = row[promo_sku_col]
-            start = pd.to_datetime(row['start_date'])
-            end = pd.to_datetime(row['end_date'])
-            
-            if sku not in sku_promotion_periods:
-                sku_promotion_periods[sku] = []
-            
-            sku_promotion_periods[sku].append((start, end))
-    
-    # Group SKUs by pattern type
-    pattern_skus = {}
-    for sku, pattern in sku_patterns.items():
-        if pattern not in pattern_skus:
-            pattern_skus[pattern] = []
-        pattern_skus[pattern].append(sku)
-    
-    # Create one visualization per pattern type
-    for pattern, skus in pattern_skus.items():
-        if not skus:
-            continue
+    if band_avgs:
+        bands = list(band_avgs.keys())
+        avgs = list(band_avgs.values())
         
-        # Sort SKUs by data volume for better visualization
-        sku_data_counts = {}
-        for sku in skus:
-            sku_data_counts[sku] = len(actuals[actuals[sku_col_act] == sku])
-        
-        sorted_skus = sorted(sku_data_counts.items(), key=lambda x: x[1], reverse=True)
-        
-        # Select top 3 SKUs with most data (or fewer if not enough data)
-        selected_skus = [sku for sku, count in sorted_skus[:3] if count > 0]
-        
-        if not selected_skus:
-            logger.warning(f"No SKUs with data found for pattern '{pattern}'")
-            continue
-        
-        # Create a visualization for this pattern type
-        plt.figure(figsize=(18, 15))
-        plt.suptitle(f"Pattern Type: {pattern.upper()} - Forecast Improvements", fontsize=16)
-        
-        for i, sku in enumerate(selected_skus):
-            # Get data for this SKU
-            sku_original = original_forecasts[original_forecasts[sku_col_orig] == sku]
-            sku_adjusted = adjusted_forecasts[adjusted_forecasts[sku_col_adj] == sku]
-            sku_actuals = actuals[actuals[sku_col_act] == sku]
-            
-            # Convert dates to datetime
-            if 'date' in sku_original.columns:
-                sku_original['date'] = pd.to_datetime(sku_original['date'])
-            if 'target_date' in sku_original.columns:
-                sku_original['target_date'] = pd.to_datetime(sku_original['target_date'])
-            
-            if 'date' in sku_adjusted.columns:
-                sku_adjusted['date'] = pd.to_datetime(sku_adjusted['date'])
-            if 'target_date' in sku_adjusted.columns:
-                sku_adjusted['target_date'] = pd.to_datetime(sku_adjusted['target_date'])
-            
-            if 'date' in sku_actuals.columns:
-                sku_actuals['date'] = pd.to_datetime(sku_actuals['date'])
-            
-            # Plot the data
-            ax = plt.subplot(3, 1, i + 1)
-            plt.title(f"SKU: {sku}")
-            
-            date_col = 'date' if 'date' in sku_actuals.columns else 'target_date'
-            
-            # Plot actual values
-            if not sku_actuals.empty and date_col in sku_actuals.columns:
-                plt.plot(sku_actuals[date_col], sku_actuals['actual_value'], 'k-', label='Actual')
-            
-            # Plot original forecast
-            forecast_col = 'original_forecast' if 'original_forecast' in sku_original.columns else 'forecast'
-            if not sku_original.empty and date_col in sku_original.columns:
-                plt.plot(sku_original[date_col], sku_original[forecast_col], 'b--', label='Original Forecast')
-            
-            # Plot adjusted forecast
-            if not sku_adjusted.empty and date_col in sku_adjusted.columns:
-                plt.plot(sku_adjusted[date_col], sku_adjusted['adjusted_forecast'], 'r-', label='RL Adjusted')
-            
-            # Add pattern-specific annotations
-            if pattern == "underbias":
-                plt.annotate("Consistent underbias corrected", 
-                            xy=(0.5, 0.9), xycoords='axes fraction',
-                            ha='center', va='center',
-                            bbox=dict(boxstyle="round", fc="yellow", alpha=0.3))
-                
-                # Calculate average improvement
-                if not sku_original.empty and not sku_adjusted.empty and not sku_actuals.empty:
-                    # Join data on date
-                    merged = pd.merge(
-                        pd.merge(
-                            sku_original[[date_col, forecast_col]], 
-                            sku_adjusted[[date_col, 'adjusted_forecast']], 
-                            on=date_col
-                        ),
-                        sku_actuals[[date_col, 'actual_value']],
-                        on=date_col
-                    )
-                    
-                    if not merged.empty:
-                        # Calculate MAPE
-                        merged['original_mape'] = abs(merged[forecast_col] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-                        merged['adjusted_mape'] = abs(merged['adjusted_forecast'] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-                        
-                        avg_orig_mape = merged['original_mape'].mean()
-                        avg_adj_mape = merged['adjusted_mape'].mean()
-                        
-                        improvement = (avg_orig_mape - avg_adj_mape) / avg_orig_mape * 100
-                        
-                        plt.annotate(f"MAPE Improvement: {improvement:.1f}%", 
-                                    xy=(0.5, 0.82), xycoords='axes fraction',
-                                    ha='center', va='center',
-                                    bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-            
-            elif pattern == "promo_holiday":
-                # Find and mark holidays
-                if date_col in sku_original.columns:
-                    for date_str in holiday_dates:
-                        date = pd.to_datetime(date_str)
-                        if date >= sku_original[date_col].min() and date <= sku_original[date_col].max():
-                            plt.axvspan(date - pd.Timedelta(days=0.5), 
-                                        date + pd.Timedelta(days=0.5), 
-                                        alpha=0.2, color='green', label='_Holiday')
-                
-                # Find and mark promotions
-                if sku in sku_promotion_periods and date_col in sku_original.columns:
-                    for start, end in sku_promotion_periods[sku]:
-                        if end >= sku_original[date_col].min() and start <= sku_original[date_col].max():
-                            plt.axvspan(max(start, sku_original[date_col].min()), 
-                                        min(end, sku_original[date_col].max()), 
-                                        alpha=0.2, color='red', label='_Promotion')
-                
-                plt.annotate("Holiday/Promo adjustment", 
-                            xy=(0.5, 0.9), xycoords='axes fraction',
-                            ha='center', va='center',
-                            bbox=dict(boxstyle="round", fc="yellow", alpha=0.3))
-                
-                # Calculate holiday/promo specific improvements
-                if 'is_holiday' in sku_original.columns and 'is_promotion' in sku_original.columns:
-                    # Get holiday and promo data points
-                    special_days = sku_original[(sku_original['is_holiday'] == True) | 
-                                                (sku_original['is_promotion'] == True)]
-                    
-                    if not special_days.empty:
-                        special_dates = set(special_days[date_col])
-                        
-                        # Merge data for special days
-                        merged = pd.merge(
-                            pd.merge(
-                                sku_original[sku_original[date_col].isin(special_dates)][[date_col, forecast_col]], 
-                                sku_adjusted[sku_adjusted[date_col].isin(special_dates)][[date_col, 'adjusted_forecast']], 
-                                on=date_col
-                            ),
-                            sku_actuals[sku_actuals[date_col].isin(special_dates)][[date_col, 'actual_value']],
-                            on=date_col
-                        )
-                        
-                        if not merged.empty:
-                            # Calculate MAPE
-                            merged['original_mape'] = abs(merged[forecast_col] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-                            merged['adjusted_mape'] = abs(merged['adjusted_forecast'] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-                            
-                            avg_orig_mape = merged['original_mape'].mean()
-                            avg_adj_mape = merged['adjusted_mape'].mean()
-                            
-                            improvement = (avg_orig_mape - avg_adj_mape) / avg_orig_mape * 100
-                            
-                            plt.annotate(f"Holiday/Promo MAPE Improvement: {improvement:.1f}%", 
-                                        xy=(0.5, 0.82), xycoords='axes fraction',
-                                        ha='center', va='center',
-                                        bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-            
-            elif pattern == "day_pattern":
-                # Mark weekends
-                if date_col in sku_actuals.columns:
-                    for date in pd.date_range(sku_actuals[date_col].min(), sku_actuals[date_col].max()):
-                        if date.weekday() >= 5:  # Weekend
-                            plt.axvspan(date - pd.Timedelta(days=0.5), 
-                                        date + pd.Timedelta(days=0.5), 
-                                        alpha=0.1, color='blue', label='_Weekend')
-                
-                plt.annotate("Day of week pattern learned", 
-                            xy=(0.5, 0.9), xycoords='axes fraction',
-                            ha='center', va='center',
-                            bbox=dict(boxstyle="round", fc="yellow", alpha=0.3))
-                
-                # Calculate weekend-specific improvements
-                if 'is_weekend' in sku_original.columns:
-                    # Get weekend data points
-                    weekend_days = sku_original[sku_original['is_weekend'] == True]
-                    
-                    if not weekend_days.empty:
-                        weekend_dates = set(weekend_days[date_col])
-                        
-                        # Merge data for weekends
-                        merged = pd.merge(
-                            pd.merge(
-                                sku_original[sku_original[date_col].isin(weekend_dates)][[date_col, forecast_col]], 
-                                sku_adjusted[sku_adjusted[date_col].isin(weekend_dates)][[date_col, 'adjusted_forecast']], 
-                                on=date_col
-                            ),
-                            sku_actuals[sku_actuals[date_col].isin(weekend_dates)][[date_col, 'actual_value']],
-                            on=date_col
-                        )
-                        
-                        if not merged.empty:
-                            # Calculate MAPE
-                            merged['original_mape'] = abs(merged[forecast_col] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-                            merged['adjusted_mape'] = abs(merged['adjusted_forecast'] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-                            
-                            avg_orig_mape = merged['original_mape'].mean()
-                            avg_adj_mape = merged['adjusted_mape'].mean()
-                            
-                            improvement = (avg_orig_mape - avg_adj_mape) / avg_orig_mape * 100
-                            
-                            plt.annotate(f"Weekend MAPE Improvement: {improvement:.1f}%", 
-                                        xy=(0.5, 0.82), xycoords='axes fraction',
-                                        ha='center', va='center',
-                                        bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-            
-            # Remove duplicate labels
-            handles, labels = plt.gca().get_legend_handles_labels()
-            by_label = dict(zip(labels, handles))
-            plt.legend(by_label.values(), by_label.keys())
-            
-            plt.grid(True, alpha=0.3)
-            plt.xticks(rotation=45)
-        
-        plt.tight_layout()
-        plt.subplots_adjust(top=0.95)
-        plt.savefig(os.path.join(output_dir, f"{pattern}_learning_showcase.png"))
-        plt.close()
-    
-    logger.info(f"Visualization complete. Images saved to {output_dir}")
-
-
-def calculate_context_specific_improvements(
-    original_forecasts: pd.DataFrame,
-    adjusted_forecasts: pd.DataFrame,
-    actuals: pd.DataFrame,
-    logger: Optional[logging.Logger] = None
-) -> Dict:
-    """
-    Calculate improvement metrics for different contexts.
-    
-    Args:
-        original_forecasts: DataFrame with original ML forecasts
-        adjusted_forecasts: DataFrame with RL-adjusted forecasts
-        actuals: DataFrame with actual values
-        logger: Optional logger instance
-        
-    Returns:
-        Dictionary of metrics by context
-    """
-    if logger is None:
-        logger = logging.getLogger("Metrics")
-    
-    metrics = {
-        "overall": {"original_mape": 0, "adjusted_mape": 0, "count": 0},
-        "holiday": {"original_mape": 0, "adjusted_mape": 0, "count": 0},
-        "promotion": {"original_mape": 0, "adjusted_mape": 0, "count": 0},
-        "weekend": {"original_mape": 0, "adjusted_mape": 0, "count": 0},
-        "weekday": {"original_mape": 0, "adjusted_mape": 0, "count": 0},
-        "by_pattern": {}
-    }
-    
-    # Get column names
-    # SKU column
-    sku_col_orig = 'sku_id' if 'sku_id' in original_forecasts.columns else 'sku'
-    sku_col_adj = 'sku_id' if 'sku_id' in adjusted_forecasts.columns else 'sku'
-    sku_col_act = 'sku_id' if 'sku_id' in actuals.columns else 'sku'
-    
-    # Date column
-    date_col_orig = next((col for col in ['date', 'target_date'] if col in original_forecasts.columns), None)
-    date_col_adj = next((col for col in ['date', 'target_date'] if col in adjusted_forecasts.columns), None)
-    date_col_act = next((col for col in ['date', 'target_date'] if col in actuals.columns), None)
-    
-    # Forecast column
-    forecast_col = 'original_forecast' if 'original_forecast' in original_forecasts.columns else 'forecast'
-    if forecast_col not in original_forecasts.columns:
-        logger.warning(f"Forecast column not found in {original_forecasts.columns}")
-        return metrics
-    
-    # Check if we have all necessary columns
-    if date_col_orig is None or date_col_adj is None or date_col_act is None:
-        logger.error("Missing date columns - cannot merge datasets")
-        return metrics
-    
-    logger.info(f"Using columns - SKU: {sku_col_orig}/{sku_col_adj}/{sku_col_act}, "
-               f"Date: {date_col_orig}/{date_col_adj}/{date_col_act}, "
-               f"Forecast: {forecast_col}")
-    
-    # Ensure date columns are in datetime format
-    original_forecasts[date_col_orig] = pd.to_datetime(original_forecasts[date_col_orig])
-    adjusted_forecasts[date_col_adj] = pd.to_datetime(adjusted_forecasts[date_col_adj])
-    actuals[date_col_act] = pd.to_datetime(actuals[date_col_act])
-    
-    # Check for context columns and add them if missing
-    context_cols = ['is_holiday', 'is_promotion', 'is_weekend']
-    for col in context_cols:
-        if col not in original_forecasts.columns:
-            logger.warning(f"Adding missing column '{col}' with default value False")
-            original_forecasts[col] = False
-    
-    # Check for pattern_type column
-    if 'pattern_type' not in actuals.columns:
-        logger.warning("No pattern_type column in actuals data - pattern-specific metrics will be skipped")
-        has_pattern_types = False
-    else:
-        has_pattern_types = True
-    
-    # Select required columns
-    orig_cols = [date_col_orig, sku_col_orig, forecast_col] + context_cols
-    adj_cols = [date_col_adj, sku_col_adj, 'adjusted_forecast']
-    act_cols = [date_col_act, sku_col_act, 'actual_value']
-    if has_pattern_types:
-        act_cols.append('pattern_type')
-    
-    # Merge datasets with flexible column names
-    try:
-        # First merge original and adjusted
-        merged = pd.merge(
-            original_forecasts[orig_cols],
-            adjusted_forecasts[adj_cols],
-            left_on=[date_col_orig, sku_col_orig],
-            right_on=[date_col_adj, sku_col_adj]
-        )
-        
-        # Then merge with actuals
-        merged = pd.merge(
-            merged,
-            actuals[act_cols],
-            left_on=[date_col_orig, sku_col_orig],
-            right_on=[date_col_act, sku_col_act]
-        )
-    except Exception as e:
-        logger.error(f"Error merging datasets: {str(e)}")
-        return metrics
-    
-    if merged.empty:
-        logger.warning("No matching data found for calculating metrics")
-        return metrics
-    
-    # Calculate MAPE for each row
-    merged['original_mape'] = abs(merged[forecast_col] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-    merged['adjusted_mape'] = abs(merged['adjusted_forecast'] - merged['actual_value']) / merged['actual_value'].replace(0, 1)
-    
-    # Calculate overall metrics
-    metrics["overall"]["original_mape"] = merged['original_mape'].mean()
-    metrics["overall"]["adjusted_mape"] = merged['adjusted_mape'].mean()
-    metrics["overall"]["count"] = len(merged)
-    
-    # Calculate holiday metrics
-    holiday_data = merged[merged['is_holiday'] == True]
-    if not holiday_data.empty:
-        metrics["holiday"]["original_mape"] = holiday_data['original_mape'].mean()
-        metrics["holiday"]["adjusted_mape"] = holiday_data['adjusted_mape'].mean()
-        metrics["holiday"]["count"] = len(holiday_data)
-    
-    # Calculate promotion metrics
-    promo_data = merged[merged['is_promotion'] == True]
-    if not promo_data.empty:
-        metrics["promotion"]["original_mape"] = promo_data['original_mape'].mean()
-        metrics["promotion"]["adjusted_mape"] = promo_data['adjusted_mape'].mean()
-        metrics["promotion"]["count"] = len(promo_data)
-    
-    # Calculate weekend metrics
-    weekend_data = merged[merged['is_weekend'] == True]
-    if not weekend_data.empty:
-        metrics["weekend"]["original_mape"] = weekend_data['original_mape'].mean()
-        metrics["weekend"]["adjusted_mape"] = weekend_data['adjusted_mape'].mean()
-        metrics["weekend"]["count"] = len(weekend_data)
-    
-    # Calculate weekday metrics
-    weekday_data = merged[merged['is_weekend'] == False]
-    if not weekday_data.empty:
-        metrics["weekday"]["original_mape"] = weekday_data['original_mape'].mean()
-        metrics["weekday"]["adjusted_mape"] = weekday_data['adjusted_mape'].mean()
-        metrics["weekday"]["count"] = len(weekday_data)
-    
-    # Calculate metrics by pattern type
-    for pattern_type in merged['pattern_type'].unique():
-        pattern_data = merged[merged['pattern_type'] == pattern_type]
-        metrics["by_pattern"][pattern_type] = {
-            "original_mape": pattern_data['original_mape'].mean(),
-            "adjusted_mape": pattern_data['adjusted_mape'].mean(),
-            "count": len(pattern_data)
-        }
-    
-    # Calculate improvement percentages
-    for context in metrics:
-        if context != "by_pattern":
-            if metrics[context]["count"] > 0:
-                metrics[context]["improvement"] = ((metrics[context]["original_mape"] - 
-                                                  metrics[context]["adjusted_mape"]) / 
-                                                 metrics[context]["original_mape"] * 100)
-        else:
-            for pattern in metrics["by_pattern"]:
-                pattern_metrics = metrics["by_pattern"][pattern]
-                if pattern_metrics["count"] > 0:
-                    pattern_metrics["improvement"] = ((pattern_metrics["original_mape"] - 
-                                                      pattern_metrics["adjusted_mape"]) / 
-                                                     pattern_metrics["original_mape"] * 100)
-    
-    return metrics
-
-
-def plot_metrics_summary(metrics: Dict, output_dir: str = "output/visualizations", logger: Optional[logging.Logger] = None):
-    """
-    Create summary plots of forecast adjustment metrics.
-    
-    Args:
-        metrics: Dictionary of metrics by context
-        output_dir: Directory to save visualizations
-        logger: Optional logger instance
-    """
-    if logger is None:
-        logger = logging.getLogger("Metrics")
-    
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Plot 1: Improvement by context
-    plt.figure(figsize=(12, 8))
-    
-    contexts = ['Overall', 'Holiday', 'Promotion', 'Weekend', 'Weekday']
-    improvements = [
-        metrics['overall'].get('improvement', 0),
-        metrics['holiday'].get('improvement', 0),
-        metrics['promotion'].get('improvement', 0),
-        metrics['weekend'].get('improvement', 0),
-        metrics['weekday'].get('improvement', 0)
-    ]
-    
-    # Filter out contexts with no data
-    valid_contexts = []
-    valid_improvements = []
-    for c, i in zip(contexts, improvements):
-        if i != 0:
-            valid_contexts.append(c)
-            valid_improvements.append(i)
-    
-    plt.bar(valid_contexts, valid_improvements, color=['blue', 'green', 'red', 'purple', 'orange'][:len(valid_contexts)])
-    plt.title('MAPE Improvement by Context (%)', fontsize=14)
-    plt.ylabel('Improvement %')
-    plt.grid(True, alpha=0.3)
-    
-    # Add values on top of bars
-    for i, v in enumerate(valid_improvements):
-        plt.text(i, v + 1, f"{v:.1f}%", ha='center')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'improvement_by_context.png'))
-    plt.close()
-    
-    # Plot 2: Improvement by pattern type
-    if metrics['by_pattern']:
-        plt.figure(figsize=(12, 8))
-        
-        patterns = list(metrics['by_pattern'].keys())
-        pattern_improvements = [metrics['by_pattern'][p].get('improvement', 0) for p in patterns]
-        
-        plt.bar(patterns, pattern_improvements, color=['blue', 'green', 'red'])
-        plt.title('MAPE Improvement by Pattern Type (%)', fontsize=14)
-        plt.ylabel('Improvement %')
+        plt.bar(bands, avgs)
+        plt.title('Average Adjustment Factor by SKU Band')
+        plt.ylabel('Avg Adjustment Factor')
         plt.grid(True, alpha=0.3)
         
-        # Add values on top of bars
-        for i, v in enumerate(pattern_improvements):
-            plt.text(i, v + 1, f"{v:.1f}%", ha='center')
+        # Add value labels
+        for i, v in enumerate(avgs):
+            plt.text(i, v + 0.01, f"{v:.2f}", ha='center')
+    
+    # Plot 2: Distribution of adjustment direction by band
+    plt.subplot(2, 2, 2)
+    
+    # Setup data
+    bands = sorted(adjustments_df['sku_band'].unique())
+    upward_pct = []
+    downward_pct = []
+    neutral_pct = []
+    
+    for band in bands:
+        band_df = adjustments_df[adjustments_df['sku_band'] == band]
+        total = len(band_df)
         
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'improvement_by_pattern.png'))
-        plt.close()
+        if total > 0:
+            # Calculate percentages
+            up = len(band_df[band_df['adjustment_factor'] > 1.0]) / total * 100
+            neutral = len(band_df[band_df['adjustment_factor'] == 1.0]) / total * 100
+            down = len(band_df[band_df['adjustment_factor'] < 1.0]) / total * 100
+            
+            upward_pct.append(up)
+            neutral_pct.append(neutral)
+            downward_pct.append(down)
+        else:
+            upward_pct.append(0)
+            neutral_pct.append(0)
+            downward_pct.append(0)
     
-    # Plot 3: Original vs Adjusted MAPE by context
-    plt.figure(figsize=(12, 8))
-    
-    # Prepare data
-    orig_mape = [
-        metrics['overall'].get('original_mape', 0),
-        metrics['holiday'].get('original_mape', 0),
-        metrics['promotion'].get('original_mape', 0),
-        metrics['weekend'].get('original_mape', 0),
-        metrics['weekday'].get('original_mape', 0)
-    ]
-    
-    adj_mape = [
-        metrics['overall'].get('adjusted_mape', 0),
-        metrics['holiday'].get('adjusted_mape', 0),
-        metrics['promotion'].get('adjusted_mape', 0),
-        metrics['weekend'].get('adjusted_mape', 0),
-        metrics['weekday'].get('adjusted_mape', 0)
-    ]
-    
-    # Filter valid contexts
-    valid_contexts = []
-    valid_orig = []
-    valid_adj = []
-    for c, o, a in zip(contexts, orig_mape, adj_mape):
-        if o != 0 or a != 0:
-            valid_contexts.append(c)
-            valid_orig.append(o)
-            valid_adj.append(a)
-    
-    x = np.arange(len(valid_contexts))
+    # Create stacked bar chart
+    x = np.arange(len(bands))
     width = 0.35
     
-    plt.bar(x - width/2, valid_orig, width, label='Original ML Forecast', color='royalblue')
-    plt.bar(x + width/2, valid_adj, width, label='RL Adjusted Forecast', color='lightcoral')
+    p1 = plt.bar(x, upward_pct, width, label='Upward (>1.0)')
+    p2 = plt.bar(x, neutral_pct, width, bottom=upward_pct, label='No Change (=1.0)')
+    p3 = plt.bar(x, downward_pct, width, bottom=[upward_pct[i] + neutral_pct[i] for i in range(len(upward_pct))], label='Downward (<1.0)')
     
-    plt.title('MAPE Before vs After Adjustment by Context', fontsize=14)
-    plt.ylabel('MAPE')
-    plt.xticks(x, valid_contexts)
+    plt.title('Adjustment Direction by SKU Band')
+    plt.ylabel('Percentage')
+    plt.xlabel('SKU Band')
+    plt.xticks(x, bands)
     plt.legend()
-    plt.grid(True, alpha=0.3)
     
-    # Add percentage values on bars
-    for i, (o, a) in enumerate(zip(valid_orig, valid_adj)):
-        plt.text(i - width/2, o + 0.01, f"{o:.2f}", ha='center', va='bottom', fontsize=9)
-        plt.text(i + width/2, a + 0.01, f"{a:.2f}", ha='center', va='bottom', fontsize=9)
+    # Plot 3: Context-specific adjustments by band
+    plt.subplot(2, 2, 3)
+    
+    # Setup data - we'll compare bands A and E (if available)
+    if 'A' in bands and 'E' in bands and 'is_holiday' in adjustments_df.columns and 'is_promotion' in adjustments_df.columns:
+        band_A = adjustments_df[adjustments_df['sku_band'] == 'A']
+        band_E = adjustments_df[adjustments_df['sku_band'] == 'E']
+        
+        contexts = ['Regular', 'Holiday', 'Promotion']
+        A_avgs = []
+        E_avgs = []
+        
+        # Regular days
+        A_reg = band_A[(~band_A['is_holiday']) & (~band_A['is_promotion'])]
+        E_reg = band_E[(~band_E['is_holiday']) & (~band_E['is_promotion'])]
+        A_avgs.append(A_reg['adjustment_factor'].mean() if not A_reg.empty else 0)
+        E_avgs.append(E_reg['adjustment_factor'].mean() if not E_reg.empty else 0)
+        
+        # Holidays
+        A_holiday = band_A[band_A['is_holiday']]
+        E_holiday = band_E[band_E['is_holiday']]
+        A_avgs.append(A_holiday['adjustment_factor'].mean() if not A_holiday.empty else 0)
+        E_avgs.append(E_holiday['adjustment_factor'].mean() if not E_holiday.empty else 0)
+        
+        # Promotions
+        A_promo = band_A[band_A['is_promotion']]
+        E_promo = band_E[band_E['is_promotion']]
+        A_avgs.append(A_promo['adjustment_factor'].mean() if not A_promo.empty else 0)
+        E_avgs.append(E_promo['adjustment_factor'].mean() if not E_promo.empty else 0)
+        
+        # Create grouped bar chart
+        x = np.arange(len(contexts))
+        width = 0.35
+        
+        plt.bar(x - width/2, A_avgs, width, label='Band A (Fast)')
+        plt.bar(x + width/2, E_avgs, width, label='Band E (Slow)')
+        
+        plt.title('Context-Specific Adjustments: Fast vs. Slow SKUs')
+        plt.ylabel('Avg Adjustment Factor')
+        plt.xticks(x, contexts)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+    
+    # Plot 4: Histogram comparison of adjustment factors
+    plt.subplot(2, 2, 4)
+    
+    # Setup data
+    if len(bands) >= 2:
+        # Select the first and last band (usually A and E)
+        first_band = bands[0]
+        last_band = bands[-1]
+        
+        first_df = adjustments_df[adjustments_df['sku_band'] == first_band]
+        last_df = adjustments_df[adjustments_df['sku_band'] == last_band]
+        
+        plt.hist(first_df['adjustment_factor'], bins=20, alpha=0.5, label=f'Band {first_band}')
+        plt.hist(last_df['adjustment_factor'], bins=20, alpha=0.5, label=f'Band {last_band}')
+        
+        plt.title(f'Adjustment Factor Distribution: Band {first_band} vs {last_band}')
+        plt.xlabel('Adjustment Factor')
+        plt.ylabel('Count')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'mape_comparison_by_context.png'))
+    plt.savefig(os.path.join(output_dir, 'band_comparisons.png'))
     plt.close()
+    
+    logger.info(f"Saved band comparison visualizations to {output_dir}")
