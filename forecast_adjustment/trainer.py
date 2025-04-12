@@ -1,6 +1,6 @@
 """
 Enhanced Trainer Module - Handles training, evaluation, and forecast generation
-with improved learning mechanisms for different forecast patterns.
+with improved learning mechanisms for different forecast patterns and SKU bands.
 """
 
 import numpy as np
@@ -16,26 +16,26 @@ from tqdm import tqdm
 class ForecastTrainer:
     """
     Enhanced trainer for forecast adjustment with better support for learning
-    different patterns like calendar effects, holidays, and promotions.
+    different patterns like calendar effects, holidays, promotions, and SKU bands.
     """
     
     def __init__(self, 
                 agent,
                 environment, 
                 output_dir: str = "output",
-                num_episodes: int = 500,  # Increased from 100
+                num_episodes: int = 500,
                 max_steps: int = 14,
-                batch_size: int = 64,  # Increased from 32
+                batch_size: int = 64,
                 save_every: int = 25,
                 optimize_for: str = "both",  # "mape", "bias", or "both"
-                training_phases: Optional[List[Dict]] = None,  # New parameter for curriculum learning
+                training_phases: Optional[List[Dict]] = None,
                 logger: Optional[logging.Logger] = None):
         """
-        Initialize enhanced trainer.
+        Initialize enhanced trainer with SKU band support.
         
         Args:
-            agent: Enhanced linear agent
-            environment: Enhanced forecast environment
+            agent: Enhanced linear agent with band support
+            environment: Enhanced forecast environment with band support
             output_dir: Directory for outputs
             num_episodes: Number of episodes to train
             max_steps: Maximum steps per episode
@@ -89,7 +89,8 @@ class ForecastTrainer:
         # Verify that phases sum to total episodes
         total_phase_episodes = sum(phase['episodes'] for phase in self.training_phases)
         if total_phase_episodes != num_episodes:
-            self.logger.warning(f"Training phases sum to {total_phase_episodes} episodes, but num_episodes is {num_episodes}. Adjusting phases.")
+            if logger:
+                logger.warning(f"Training phases sum to {total_phase_episodes} episodes, but num_episodes is {num_episodes}. Adjusting phases.")
             # Adjust the last phase to make up the difference
             self.training_phases[-1]['episodes'] += (num_episodes - total_phase_episodes)
         
@@ -135,6 +136,15 @@ class ForecastTrainer:
             'bias_improvements': []
         }
         
+        # NEW: Band-specific metrics
+        self.band_metrics = {
+            'A': {'scores': [], 'mape_improvements': [], 'bias_improvements': []},
+            'B': {'scores': [], 'mape_improvements': [], 'bias_improvements': []},
+            'C': {'scores': [], 'mape_improvements': [], 'bias_improvements': []},
+            'D': {'scores': [], 'mape_improvements': [], 'bias_improvements': []},
+            'E': {'scores': [], 'mape_improvements': [], 'bias_improvements': []}
+        }
+        
         # Pattern-specific metrics
         self.pattern_metrics = {}
         
@@ -144,35 +154,46 @@ class ForecastTrainer:
         self.best_bias_improvement = 0.0
         self.best_epoch = 0
     
-    def _extract_calendar_features(self, state: np.ndarray, feature_dims: Tuple) -> Dict:
+    def _extract_context_features(self, state: np.ndarray, feature_dims: Tuple) -> Dict:
         """
-        Extract calendar features from state representation.
+        Extract calendar and band features from state representation.
         
         Args:
             state: State vector
             feature_dims: Feature dimensions from environment
             
         Returns:
-            Dictionary of calendar features
+            Dictionary of context features
         """
-        forecast_dim, error_dim, calendar_dim, holiday_dim, promo_dim, horizon_dim, _ = feature_dims
+        forecast_dim, error_dim, calendar_dim, holiday_dim, promo_dim, horizon_dim, band_dim, _ = feature_dims
         
-        # Calculate starting index for calendar features
+        # Calculate starting indices for different feature groups
         calendar_start = forecast_dim + error_dim
+        band_start = calendar_start + calendar_dim + holiday_dim + promo_dim + horizon_dim
         
-        # Check if we have calendar features
-        if len(state) <= calendar_start:
-            return {'is_weekend': False}
+        # Extract calendar features (is_weekend from the first day's features)
+        is_weekend = False
+        if len(state) > calendar_start + 2:  # Ensure we have calendar features
+            # Calendar features are structured as [day_of_week, day_of_month, is_weekend] for each day
+            is_weekend = bool(state[calendar_start + 2] > 0.5)  # Third feature is is_weekend
         
-        # Extract is_weekend from the first day's features
-        # Calendar features are structured as [day_of_week, day_of_month, is_weekend] for each day
-        is_weekend = bool(state[calendar_start + 2] > 0.5)  # Third feature is is_weekend
+        # Extract SKU band (one-hot encoding)
+        band = 'C'  # Default to 'C' if not found
+        if len(state) > band_start + 4:  # Ensure we have band features
+            band_values = state[band_start:band_start+5]
+            if max(band_values) > 0.5:  # If one-hot encoding is present
+                band_idx = np.argmax(band_values)
+                band = ['A', 'B', 'C', 'D', 'E'][band_idx]
         
-        return {'is_weekend': is_weekend}
+        return {
+            'is_weekend': is_weekend,
+            'sku_band': band
+        }
         
     def train(self, verbose: bool = True) -> Dict:
         """
-        Train the agent for forecast adjustment using curriculum learning.
+        Train the agent for forecast adjustment using curriculum learning,
+        with support for SKU banding.
         
         Args:
             verbose: Whether to print progress
@@ -186,6 +207,9 @@ class ForecastTrainer:
         # Initialize phase counters
         phase_idx = 0
         episode_counter = 0
+        
+        # Get feature dimensions
+        feature_dims = self.env.get_feature_dims()
         
         # Training loop with phases
         for phase in self.training_phases:
@@ -217,6 +241,15 @@ class ForecastTrainer:
                     'weekday': {'scores': [], 'mape_imps': [], 'bias_imps': []}
                 }
                 
+                # NEW: Track band-specific metrics
+                band_metrics = {
+                    'A': {'scores': [], 'mape_imps': [], 'bias_imps': []},
+                    'B': {'scores': [], 'mape_imps': [], 'bias_imps': []},
+                    'C': {'scores': [], 'mape_imps': [], 'bias_imps': []},
+                    'D': {'scores': [], 'mape_imps': [], 'bias_imps': []},
+                    'E': {'scores': [], 'mape_imps': [], 'bias_imps': []}
+                }
+                
                 # Track pattern-specific metrics
                 pattern_episode_metrics = {}
                 
@@ -231,16 +264,13 @@ class ForecastTrainer:
                     
                     # Determine adjustments for all SKUs
                     for i, sku in enumerate(self.env.skus):
-                        # Get feature dimensions
-                        feature_dims = self.env.get_feature_dims()
-                        forecast_dim = feature_dims[0]
-                        
                         # State features for this SKU
                         sku_state = state[i]
                         
-                        # Extract calendar information for context-based tracking
-                        calendar_features = self._extract_calendar_features(sku_state, feature_dims)
-                        is_weekend = calendar_features.get('is_weekend', False)
+                        # Extract context information
+                        context_features = self._extract_context_features(sku_state, feature_dims)
+                        is_weekend = context_features.get('is_weekend', False)
+                        sku_band = context_features.get('sku_band', 'C')
                         
                         # Get pattern type if available
                         pattern_type = "unknown"
@@ -250,17 +280,25 @@ class ForecastTrainer:
                         
                         # Get action from agent with context
                         context = {
-                            'is_holiday': False,  # This will be updated after the environment step
-                            'is_promotion': False,  # This will be updated after the environment step
+                            'is_holiday': False,  # Will be updated after the environment step
+                            'is_promotion': False,  # Will be updated after the environment step
                             'is_weekend': is_weekend,
-                            'pattern_type': pattern_type
+                            'pattern_type': pattern_type,
+                            'sku_band': sku_band  # NEW: Add band information
                         }
                         
-                        # Apply phase-specific exploration
+                        # Apply phase-specific exploration strategies
                         explore = True
-                        if phase_idx > 0 and pattern_type != "unknown":
-                            # Use higher exploration for certain patterns in early phases
-                            if pattern_type == "promo_holiday" and phase_idx == 1:
+                        if phase_idx > 0:
+                            # Adjust exploration based on SKU band in later phases
+                            if sku_band in ['A', 'B'] and phase_idx == 1:
+                                # Explore more for high-volume SKUs in second phase
+                                self.agent.epsilon = min(phase_epsilon * 1.2, 0.95)
+                            elif sku_band in ['D', 'E'] and phase_idx == 1:
+                                # Explore more for low-volume SKUs in second phase
+                                self.agent.epsilon = min(phase_epsilon * 1.2, 0.95)
+                            # Adjust exploration based on pattern in later phases
+                            elif pattern_type == "promo_holiday" and phase_idx == 1:
                                 # Explore more for promo/holiday patterns in second phase
                                 self.agent.epsilon = min(phase_epsilon * 1.5, 0.9)
                             elif pattern_type == "day_pattern" and phase_idx == 1:
@@ -272,7 +310,7 @@ class ForecastTrainer:
                         action_idx = self.agent.act(sku_state, explore=explore, context=context)
                         
                         # Extract forecast from state
-                        forecasts = sku_state[:forecast_dim]
+                        forecasts = sku_state[:feature_dims[0]]
                         current_forecast = forecasts[0]  # Current day's forecast
                         
                         # Calculate adjusted forecast based on action
@@ -301,8 +339,9 @@ class ForecastTrainer:
                         is_holiday = info['is_holiday'].get(sku, False)
                         is_promo = info['is_promotion'].get(sku, False)
                         
-                        # Extract pattern type if available
+                        # Extract pattern type and band if available
                         pattern_type = info.get('pattern_type', {}).get(sku, "unknown")
+                        sku_band = info.get('sku_band', {}).get(sku, "C")
                         
                         # Track pattern-specific metrics
                         if pattern_type != "unknown":
@@ -313,6 +352,12 @@ class ForecastTrainer:
                             pattern_episode_metrics[pattern_type]['scores'].append(rewards[sku])
                             pattern_episode_metrics[pattern_type]['mape_imps'].append(mape_imp)
                             pattern_episode_metrics[pattern_type]['bias_imps'].append(bias_imp)
+                        
+                        # Track band-specific metrics
+                        if sku_band in band_metrics:
+                            band_metrics[sku_band]['scores'].append(rewards[sku])
+                            band_metrics[sku_band]['mape_imps'].append(mape_imp)
+                            band_metrics[sku_band]['bias_imps'].append(bias_imp)
                         
                         # Get day of week
                         if hasattr(self.env, 'current_step') and hasattr(self.env, 'start_date'):
@@ -347,13 +392,14 @@ class ForecastTrainer:
                         next_sku_state = next_state[i]
                         action_idx, _ = adjustments[sku]
                         
+                        # Extract context features
+                        context_features = self._extract_context_features(sku_state, feature_dims)
+                        is_weekend = context_features.get('is_weekend', False)
+                        sku_band = context_features.get('sku_band', 'C')
+                        
                         # Get context for this SKU
                         is_holiday = info['is_holiday'].get(sku, False)
                         is_promo = info['is_promotion'].get(sku, False)
-                        
-                        # Get calendar features
-                        calendar_features = self._extract_calendar_features(sku_state, feature_dims)
-                        is_weekend = calendar_features.get('is_weekend', False)
                         
                         # Get pattern type
                         pattern_type = info.get('pattern_type', {}).get(sku, "unknown")
@@ -362,7 +408,8 @@ class ForecastTrainer:
                             'is_holiday': is_holiday,
                             'is_promotion': is_promo,
                             'is_weekend': is_weekend,
-                            'pattern_type': pattern_type
+                            'pattern_type': pattern_type,
+                            'sku_band': sku_band  # NEW: Include band information
                         }
                         
                         # Update agent with context
@@ -431,6 +478,17 @@ class ForecastTrainer:
                     self.weekday_metrics['scores'].append(0.0)
                     self.weekday_metrics['mape_improvements'].append(0.0)
                     self.weekday_metrics['bias_improvements'].append(0.0)
+                
+                # NEW: Store band-specific metrics
+                for band in self.band_metrics:
+                    if band in band_metrics and band_metrics[band]['scores']:
+                        self.band_metrics[band]['scores'].append(np.mean(band_metrics[band]['scores']))
+                        self.band_metrics[band]['mape_improvements'].append(np.mean(band_metrics[band]['mape_imps']))
+                        self.band_metrics[band]['bias_improvements'].append(np.mean(band_metrics[band]['bias_imps']))
+                    else:
+                        self.band_metrics[band]['scores'].append(0.0)
+                        self.band_metrics[band]['mape_improvements'].append(0.0)
+                        self.band_metrics[band]['bias_improvements'].append(0.0)
                 
                 # Store pattern-specific metrics
                 for pattern_type, metrics in pattern_episode_metrics.items():
@@ -506,6 +564,9 @@ class ForecastTrainer:
         # Plot pattern-specific learning curves
         self._plot_pattern_learning()
         
+        # NEW: Plot band-specific learning curves
+        self._plot_band_learning()
+        
         # Return metrics
         metrics = {
             'scores': self.scores,
@@ -521,603 +582,181 @@ class ForecastTrainer:
             'promo_metrics': self.promo_metrics,
             'weekend_metrics': self.weekend_metrics,
             'weekday_metrics': self.weekday_metrics,
+            'band_metrics': self.band_metrics,
             'pattern_metrics': self.pattern_metrics
         }
         
         return metrics
     
-    
-    def _plot_evaluation_summary(self, context_metrics, pattern_metrics, sku_summary, top_skus):
+    def evaluate(self, num_episodes: int = 10, verbose: bool = True) -> Dict:
         """
-        Create enhanced evaluation summary visualization with context and pattern-specific metrics.
+        Evaluate the forecast adjustment agent with context-specific metrics.
         
         Args:
-            context_metrics: Dictionary of context-specific metrics
-            pattern_metrics: Dictionary of pattern-specific metrics
-            sku_summary: Dictionary of SKU-level metrics
-            top_skus: List of top-performing SKUs
-        """
-        plt.figure(figsize=(24, 20))
-        
-        # Plot 1: MAPE improvement by context
-        plt.subplot(4, 2, 1)
-        contexts = ['Overall', 'Holidays', 'Promos', 'Weekends', 'Weekdays']
-        mape_imps = [
-            self.avg_mape_improvement if hasattr(self, 'avg_mape_improvement') else context_metrics['holiday']['avg_mape_improvement'],
-            context_metrics['holiday']['avg_mape_improvement'],
-            context_metrics['promotion']['avg_mape_improvement'],
-            context_metrics['weekend']['avg_mape_improvement'],
-            context_metrics['weekday']['avg_mape_improvement']
-        ]
-        
-        plt.bar(contexts, mape_imps, color=['blue', 'green', 'red', 'purple', 'orange'])
-        plt.title('MAPE Improvement by Context')
-        plt.ylabel('Improvement Ratio')
-        plt.xticks(rotation=45)
-        plt.grid(True, alpha=0.3)
-        
-        # Add values on top of bars
-        for i, v in enumerate(mape_imps):
-            plt.text(i, v + 0.01, f"{v:.4f}", ha='center')
-        
-        # Plot 2: MAPE improvement by pattern type
-        plt.subplot(4, 2, 2)
-        if pattern_metrics:
-            patterns = list(pattern_metrics.keys())
-            pattern_imps = [pattern_metrics[p]['avg_mape_improvement'] for p in patterns]
-            
-            plt.bar(patterns, pattern_imps, color=['darkblue', 'darkgreen', 'darkred'])
-            plt.title('MAPE Improvement by Pattern Type')
-            plt.ylabel('Improvement Ratio')
-            plt.xticks(rotation=45)
-            plt.grid(True, alpha=0.3)
-            
-            # Add values on top of bars
-            for i, v in enumerate(pattern_imps):
-                plt.text(i, v + 0.01, f"{v:.4f}", ha='center')
-        else:
-            plt.text(0.5, 0.5, "No pattern data available", ha='center', va='center')
-            plt.title('MAPE Improvement by Pattern Type')
-        
-        # Plot 3: MAPE improvement by SKU (top 10)
-        plt.subplot(4, 2, 3)
-        if len(top_skus) > 0:
-            top_10_skus = [sku for sku, _ in top_skus[:min(10, len(top_skus))]]
-            mape_imps = [sku_summary[sku]["overall"]["mape_improvement"] for sku in top_10_skus]
-            plt.bar(range(len(top_10_skus)), mape_imps)
-            plt.xticks(range(len(top_10_skus)), top_10_skus, rotation=90)
-            plt.title('MAPE Improvement by SKU (Top 10)')
-            plt.ylabel('Improvement Ratio')
-            plt.grid(True, alpha=0.3)
-            
-            # Add values on top of bars
-            for i, v in enumerate(mape_imps):
-                plt.text(i, v + 0.01, f"{v:.4f}", ha='center')
-        else:
-            plt.text(0.5, 0.5, "No SKU data available", ha='center', va='center')
-            plt.title('MAPE Improvement by SKU')
-        
-        # Plot 4: Distribution of adjustment factors
-        plt.subplot(4, 2, 4)
-        action_stats = self.agent.get_action_statistics()
-        
-        # Overall action distribution
-        action_dist = action_stats['overall']['distribution']
-        adj_factors = action_stats['overall']['factors']
-        
-        factor_labels = [f"{f:.1f}x" for f in adj_factors]
-        plt.bar(factor_labels, action_dist)
-        plt.title('Overall Adjustment Factor Distribution')
-        plt.xlabel('Adjustment Factor')
-        plt.ylabel('Frequency')
-        plt.xticks(rotation=45)
-        plt.grid(True, alpha=0.3)
-        
-        # Plot 5: Context-specific adjustment factor distributions
-        plt.subplot(4, 2, 5)
-        
-        # Set up bar positions
-        x = np.arange(len(adj_factors))
-        width = 0.35
-        
-        # Plot holiday vs promotion distributions
-        if sum(action_stats['holiday']['counts']) > 0:
-            plt.bar(x - width/2, action_stats['holiday']['distribution'], width, label='Holidays')
-        if sum(action_stats['promotion']['counts']) > 0:
-            plt.bar(x + width/2, action_stats['promotion']['distribution'], width, label='Promotions')
-        
-        plt.title('Holiday vs Promotion Adjustments')
-        plt.xlabel('Adjustment Factor')
-        plt.ylabel('Frequency')
-        plt.xticks(x, factor_labels, rotation=45)
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Plot 6: Weekend vs weekday distributions
-        plt.subplot(4, 2, 6)
-        
-        if sum(action_stats['weekend']['counts']) > 0:
-            plt.bar(x - width/2, action_stats['weekend']['distribution'], width, label='Weekends')
-        if sum(action_stats['weekday']['counts']) > 0:
-            plt.bar(x + width/2, action_stats['weekday']['distribution'], width, label='Weekdays')
-        
-        plt.title('Weekend vs Weekday Adjustments')
-        plt.xlabel('Adjustment Factor')
-        plt.ylabel('Frequency')
-        plt.xticks(x, factor_labels, rotation=45)
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        # Plot 7: Top 5 SKU profiles with context-specific improvements
-        plt.subplot(4, 2, 7)
-        if len(top_skus) >= 5:
-            top_5_skus = [sku for sku, _ in top_skus[:5]]
-            
-            # Get overall, holiday, and promo improvements for top 5 SKUs
-            overall_imps = [sku_summary[sku]["overall"]["mape_improvement"] for sku in top_5_skus]
-            holiday_imps = [sku_summary[sku]["holiday"]["mape_improvement"] for sku in top_5_skus]
-            promo_imps = [sku_summary[sku]["promotion"]["mape_improvement"] for sku in top_5_skus]
-            
-            x = np.arange(len(top_5_skus))
-            width = 0.25
-            
-            plt.bar(x - width, overall_imps, width, label='Overall')
-            plt.bar(x, holiday_imps, width, label='Holidays')
-            plt.bar(x + width, promo_imps, width, label='Promotions')
-            
-            plt.title('Top 5 SKU MAPE Improvements by Context')
-            plt.xlabel('SKU')
-            plt.ylabel('Improvement Ratio')
-            plt.xticks(x, top_5_skus, rotation=90)
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-        else:
-            plt.text(0.5, 0.5, "Insufficient SKU data", ha='center', va='center')
-            plt.title('Top SKU Improvements by Context')
-        
-        # Plot 8: Top 5 SKU pattern-specific improvements
-        plt.subplot(4, 2, 8)
-        if len(top_skus) >= 5 and pattern_metrics:
-            top_5_skus = [sku for sku, _ in top_skus[:5]]
-            patterns = list(pattern_metrics.keys())
-            
-            # Check if any of the top SKUs have pattern metrics
-            has_pattern_data = False
-            for sku in top_5_skus:
-                if sku_summary[sku]["patterns"]:
-                    has_pattern_data = True
-                    break
-            
-            if has_pattern_data and len(patterns) <= 3:  # Only plot if we have 3 or fewer patterns
-                x = np.arange(len(top_5_skus))
-                width = 0.75 / len(patterns)
-                
-                for i, pattern in enumerate(patterns):
-                    # For each pattern, get improvement for each SKU (if available)
-                    pattern_imps = []
-                    for sku in top_5_skus:
-                        if pattern in sku_summary[sku]["patterns"]:
-                            pattern_imps.append(sku_summary[sku]["patterns"][pattern]["mape_improvement"])
-                        else:
-                            pattern_imps.append(0)
-                    
-                    offset = (i - len(patterns)/2 + 0.5) * width
-                    plt.bar(x + offset, pattern_imps, width, label=pattern)
-                
-                plt.title('Top 5 SKU Pattern-Specific MAPE Improvements')
-                plt.xlabel('SKU')
-                plt.ylabel('Improvement Ratio')
-                plt.xticks(x, top_5_skus, rotation=90)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-            else:
-                plt.text(0.5, 0.5, "Insufficient pattern data for visualization", ha='center', va='center')
-                plt.title('Pattern-Specific Improvements')
-        else:
-            plt.text(0.5, 0.5, "Insufficient SKU or pattern data", ha='center', va='center')
-            plt.title('Pattern-Specific Improvements')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.log_dir, 'evaluation_summary.png'))
-        plt.close()
-    
-    def generate_adjusted_forecasts(self, num_days: int = 14) -> pd.DataFrame:
-        """
-        Generate adjusted forecasts using the trained agent, with context-specific information.
-        
-        Args:
-            num_days: Number of days to forecast
+            num_episodes: Number of episodes to evaluate
+            verbose: Whether to print progress
             
         Returns:
-            DataFrame of adjusted forecasts with context information
+            Dictionary of evaluation metrics
         """
-        self.logger.info(f"Generating adjusted forecasts for {num_days} days with context information")
+        self.logger.info(f"Starting evaluation for {num_episodes} episodes")
         
-        # Reset environment
-        state = self.env.reset()
+        # Evaluation metrics
+        eval_scores = []
+        eval_mape_improvements = []
+        eval_bias_improvements = []
         
-        # Predictions storage
-        forecast_adjustments = []
+        # Context-specific metrics
+        context_metrics = {
+            'holiday': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'promotion': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'weekend': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'weekday': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0}
+        }
         
-        for day in range(min(num_days, self.max_steps)):
-            # Get date for the current day
-            if hasattr(self.env, 'start_date'):
-                current_date = self.env.start_date + pd.Timedelta(days=day)
-                day_of_week = current_date.weekday()
-                is_weekend = day_of_week >= 5
-            else:
-                current_date = None
-                day_of_week = None
-                is_weekend = False
+        # Band-specific metrics
+        band_metrics = {
+            'A': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'B': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'C': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'D': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0},
+            'E': {'avg_mape_improvement': 0, 'avg_bias_improvement': 0}
+        }
+        
+        # Store current agent state
+        original_epsilon = self.agent.epsilon
+        self.agent.epsilon = 0  # Turn off exploration for evaluation
+        
+        # Evaluation loop
+        for episode in range(1, num_episodes + 1):
+            state = self.env.reset()
+            episode_score = 0
             
-            # Process each SKU
-            for i, sku in enumerate(self.env.skus):
-                # Extract state components
-                feature_dims = self.env.get_feature_dims()
-                forecast_dim = feature_dims[0]
+            # Track metrics for this episode
+            original_mapes = []
+            adjusted_mapes = []
+            original_biases = []
+            adjusted_biases = []
+            
+            for step in range(self.max_steps):
+                adjustments = {}
                 
-                # State features for this SKU
-                sku_state = state[i]
+                # Get actions for all SKUs (no exploration)
+                for i, sku in enumerate(self.env.skus):
+                    # Get feature dimensions
+                    feature_dims = self.env.get_feature_dims()
+                    
+                    # Extract context features
+                    context_features = self._extract_context_features(state[i], feature_dims)
+                    sku_band = context_features.get('sku_band', 'C')
+                    
+                    # Create context dictionary
+                    context = {
+                        'is_holiday': False,  # Will be set after env step
+                        'is_promotion': False,  # Will be set after env step
+                        'is_weekend': context_features.get('is_weekend', False),
+                        'sku_band': sku_band
+                    }
+                    
+                    # Get action (no exploration)
+                    action_idx = self.agent.act(state[i], explore=False, context=context)
+                    
+                    # Calculate adjusted forecast
+                    forecast = state[i][0]  # First value is the current forecast
+                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, forecast, context)
+                    
+                    adjustments[sku] = (action_idx, adjusted_forecast)
                 
-                # Extract calendar information
-                calendar_features = self._extract_calendar_features(sku_state, feature_dims)
-                is_weekend_from_features = calendar_features.get('is_weekend', False)
+                # Take step in environment
+                next_state, rewards, done, info = self.env.step(adjustments)
                 
-                # Check if this is a holiday or promotion
-                is_holiday = self.env._check_if_holiday(day) if hasattr(self.env, '_check_if_holiday') else False
-                is_promotion = self.env._check_if_promotion(sku, day) if hasattr(self.env, '_check_if_promotion') else False
+                # Update metrics
+                episode_score += sum(rewards.values())
                 
-                # Get pattern type if available
-                pattern_type = "unknown"
-                if hasattr(self.env, 'has_pattern_types') and self.env.has_pattern_types:
-                    if sku in self.env.sku_patterns:
-                        pattern_type = self.env.sku_patterns[sku]
+                # Track MAPE and bias
+                for sku in self.env.skus:
+                    original_mapes.append(info['original_mape'][sku])
+                    adjusted_mapes.append(info['adjusted_mape'][sku])
+                    original_biases.append(abs(info['original_bias'][sku]))
+                    adjusted_biases.append(abs(info['adjusted_bias'][sku]))
                 
-                # Get action from agent with context (no exploration)
-                context = {
-                    'is_holiday': is_holiday,
-                    'is_promotion': is_promotion,
-                    'is_weekend': is_weekend or is_weekend_from_features,
-                    'pattern_type': pattern_type
+                state = next_state
+                if done:
+                    break
+            
+            # Calculate episode metrics
+            avg_original_mape = np.mean(original_mapes)
+            avg_adjusted_mape = np.mean(adjusted_mapes)
+            avg_original_bias = np.mean(original_biases)
+            avg_adjusted_bias = np.mean(adjusted_biases)
+            
+            # Calculate improvements
+            mape_improvement = (avg_original_mape - avg_adjusted_mape) / avg_original_mape if avg_original_mape > 0 else 0
+            bias_improvement = (avg_original_bias - avg_adjusted_bias) / avg_original_bias if avg_original_bias > 0 else 0
+            
+            # Store metrics
+            eval_scores.append(episode_score)
+            eval_mape_improvements.append(mape_improvement)
+            eval_bias_improvements.append(bias_improvement)
+            
+            if verbose:
+                self.logger.info(f"Episode {episode}/{num_episodes} | Score: {episode_score:.2f} | MAPE Imp: {mape_improvement:.4f}")
+        
+        # Restore agent state
+        self.agent.epsilon = original_epsilon
+        
+        # Calculate aggregate metrics
+        avg_score = np.mean(eval_scores)
+        avg_mape_improvement = np.mean(eval_mape_improvements)
+        avg_bias_improvement = np.mean(eval_bias_improvements)
+        
+        # Approximate context-specific metrics from training data
+        context_metrics = {
+            'holiday': {
+                'avg_mape_improvement': np.mean(self.holiday_metrics['mape_improvements'][-50:]) if self.holiday_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.holiday_metrics['bias_improvements'][-50:]) if self.holiday_metrics['bias_improvements'] else 0
+            },
+            'promotion': {
+                'avg_mape_improvement': np.mean(self.promo_metrics['mape_improvements'][-50:]) if self.promo_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.promo_metrics['bias_improvements'][-50:]) if self.promo_metrics['bias_improvements'] else 0
+            },
+            'weekend': {
+                'avg_mape_improvement': np.mean(self.weekend_metrics['mape_improvements'][-50:]) if self.weekend_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.weekend_metrics['bias_improvements'][-50:]) if self.weekend_metrics['bias_improvements'] else 0
+            },
+            'weekday': {
+                'avg_mape_improvement': np.mean(self.weekday_metrics['mape_improvements'][-50:]) if self.weekday_metrics['mape_improvements'] else 0,
+                'avg_bias_improvement': np.mean(self.weekday_metrics['bias_improvements'][-50:]) if self.weekday_metrics['bias_improvements'] else 0
+            }
+        }
+        
+        # Approximate band-specific metrics from training data
+        band_metrics = {}
+        for band in ['A', 'B', 'C', 'D', 'E']:
+            if band in self.band_metrics and self.band_metrics[band]['mape_improvements']:
+                band_metrics[band] = {
+                    'avg_mape_improvement': np.mean(self.band_metrics[band]['mape_improvements'][-50:]),
+                    'avg_bias_improvement': np.mean(self.band_metrics[band]['bias_improvements'][-50:])
                 }
-                action_idx = self.agent.act(sku_state, explore=False, context=context)
-                
-                # Extract forecasts from state
-                forecasts = sku_state[:forecast_dim]
-                
-                # For each forecast day
-                for forecast_day in range(forecast_dim):
-                    original_forecast = forecasts[forecast_day]
-                    
-                    # Apply adjustment factor with context
-                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, original_forecast, context)
-                    factor = adjusted_forecast / original_forecast if original_forecast > 0 else 1.0
-                    
-                    # Add to predictions with context information
-                    forecast_adjustments.append({
-                        'sku_id': sku,
-                        'day': day,
-                        'date': current_date.strftime('%Y-%m-%d') if current_date else None,
-                        'day_of_week': day_of_week,
-                        'is_weekend': is_weekend,
-                        'is_holiday': is_holiday,
-                        'is_promotion': is_promotion,
-                        'forecast_day': forecast_day,
-                        'original_forecast': float(original_forecast),
-                        'adjustment_factor': float(factor),
-                        'adjusted_forecast': float(adjusted_forecast),
-                        'action_idx': int(action_idx),
-                        'pattern_type': pattern_type
-                    })
-            
-            # Calculate adjustments for environment step
-            adjustments = {}
-            for i, sku in enumerate(self.env.skus):
-                # State features
-                sku_state = state[i]
-                
-                # Extract context for this SKU and day
-                is_holiday = self.env._check_if_holiday(day) if hasattr(self.env, '_check_if_holiday') else False
-                is_promotion = self.env._check_if_promotion(sku, day) if hasattr(self.env, '_check_if_promotion') else False
-                
-                # Get pattern type
-                pattern_type = "unknown"
-                if hasattr(self.env, 'has_pattern_types') and self.env.has_pattern_types:
-                    if sku in self.env.sku_patterns:
-                        pattern_type = self.env.sku_patterns[sku]
-                
-                # Get action with context
-                context = {
-                    'is_holiday': is_holiday,
-                    'is_promotion': is_promotion,
-                    'is_weekend': is_weekend,
-                    'pattern_type': pattern_type
+            else:
+                band_metrics[band] = {
+                    'avg_mape_improvement': 0,
+                    'avg_bias_improvement': 0
                 }
-                action_idx = self.agent.act(sku_state, explore=False, context=context)
-                
-                # Extract current forecast
-                forecast_dim = feature_dims[0]
-                current_forecast = sku_state[0]  # First forecast
-                
-                # Calculate adjusted forecast
-                adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, context)
-                
-                adjustments[sku] = (action_idx, adjusted_forecast)
-            
-            # Take environment step
-            next_state, _, done, _ = self.env.step(adjustments)
-            state = next_state
-            
-            if done:
-                break
         
-        # Convert to DataFrame
-        df = pd.DataFrame(forecast_adjustments)
+        metrics = {
+            'scores': eval_scores,
+            'mape_improvements': eval_mape_improvements,
+            'bias_improvements': eval_bias_improvements,
+            'avg_score': avg_score,
+            'avg_mape_improvement': avg_mape_improvement,
+            'avg_bias_improvement': avg_bias_improvement,
+            'context_metrics': context_metrics,
+            'band_metrics': band_metrics
+        }
         
-        # Log summary statistics
-        self.logger.info(f"Generated {len(df)} forecast adjustments")
-        self.logger.info(f"Average adjustment factor: {df['adjustment_factor'].mean():.4f}")
-        
-        # Context-specific summaries
-        if 'is_holiday' in df.columns:
-            holiday_df = df[df['is_holiday'] == True]
-            if len(holiday_df) > 0:
-                self.logger.info(f"Holiday adjustments: {len(holiday_df)} rows, avg factor: {holiday_df['adjustment_factor'].mean():.4f}")
-        
-        if 'is_promotion' in df.columns:
-            promo_df = df[df['is_promotion'] == True]
-            if len(promo_df) > 0:
-                self.logger.info(f"Promotion adjustments: {len(promo_df)} rows, avg factor: {promo_df['adjustment_factor'].mean():.4f}")
-        
-        if 'is_weekend' in df.columns:
-            weekend_df = df[df['is_weekend'] == True]
-            weekday_df = df[df['is_weekend'] == False]
-            if len(weekend_df) > 0:
-                self.logger.info(f"Weekend adjustments: {len(weekend_df)} rows, avg factor: {weekend_df['adjustment_factor'].mean():.4f}")
-            if len(weekday_df) > 0:
-                self.logger.info(f"Weekday adjustments: {len(weekday_df)} rows, avg factor: {weekday_df['adjustment_factor'].mean():.4f}")
-        
-        # Pattern-specific summaries
-        if 'pattern_type' in df.columns:
-            for pattern in df['pattern_type'].unique():
-                if pattern != "unknown":
-                    pattern_df = df[df['pattern_type'] == pattern]
-                    if len(pattern_df) > 0:
-                        self.logger.info(f"{pattern} adjustments: {len(pattern_df)} rows, avg factor: {pattern_df['adjustment_factor'].mean():.4f}")
-        
-        # Save visualizations
-        self._visualize_forecast_adjustments(df)
-        
-        return df
-    
-    def _visualize_forecast_adjustments(self, adjustments_df: pd.DataFrame):
-        """
-        Create visualizations for the generated forecast adjustments.
-        
-        Args:
-            adjustments_df: DataFrame of adjustments
-        """
-        plt.figure(figsize=(24, 18))
-        
-        # Plot 1: Distribution of adjustment factors
-        plt.subplot(3, 3, 1)
-        adjustment_counts = adjustments_df['action_idx'].value_counts().sort_index()
-        factors = self.agent.adjustment_factors
-        
-        factor_labels = [f"{f:.1f}x" for f in factors]
-        counts = [adjustment_counts.get(i, 0) for i in range(len(factors))]
-        plt.bar(factor_labels, counts)
-        plt.title('Overall Adjustment Factor Distribution')
-        plt.ylabel('Count')
-        plt.xticks(rotation=45)
-        plt.grid(True, alpha=0.3)
-        
-        # Plot 2: Average adjustment by day
-        plt.subplot(3, 3, 2)
-        if 'day' in adjustments_df.columns:
-            day_factors = adjustments_df.groupby('day')['adjustment_factor'].mean()
-            plt.plot(day_factors.index, day_factors.values, 'o-')
-            plt.title('Average Adjustment Factor by Day')
-            plt.xlabel('Day')
-            plt.ylabel('Avg Factor')
-            plt.grid(True, alpha=0.3)
-        
-        # Plot 3: Context-specific adjustments
-        plt.subplot(3, 3, 3)
-        
-        contexts = []
-        avg_factors = []
-        
-        # Add overall average
-        contexts.append('Overall')
-        avg_factors.append(adjustments_df['adjustment_factor'].mean())
-        
-        # Add holiday average if present
-        if 'is_holiday' in adjustments_df.columns:
-            holiday_df = adjustments_df[adjustments_df['is_holiday'] == True]
-            if len(holiday_df) > 0:
-                contexts.append('Holiday')
-                avg_factors.append(holiday_df['adjustment_factor'].mean())
-        
-        # Add promotion average if present
-        if 'is_promotion' in adjustments_df.columns:
-            promo_df = adjustments_df[adjustments_df['is_promotion'] == True]
-            if len(promo_df) > 0:
-                contexts.append('Promo')
-                avg_factors.append(promo_df['adjustment_factor'].mean())
-        
-        # Add weekend/weekday averages if present
-        if 'is_weekend' in adjustments_df.columns:
-            weekend_df = adjustments_df[adjustments_df['is_weekend'] == True]
-            weekday_df = adjustments_df[adjustments_df['is_weekend'] == False]
-            
-            if len(weekend_df) > 0:
-                contexts.append('Weekend')
-                avg_factors.append(weekend_df['adjustment_factor'].mean())
-            
-            if len(weekday_df) > 0:
-                contexts.append('Weekday')
-                avg_factors.append(weekday_df['adjustment_factor'].mean())
-        
-        # Add pattern-specific averages if present
-        if 'pattern_type' in adjustments_df.columns:
-            for pattern in adjustments_df['pattern_type'].unique():
-                if pattern != "unknown":
-                    pattern_df = adjustments_df[adjustments_df['pattern_type'] == pattern]
-                    if len(pattern_df) > 0:
-                        contexts.append(pattern)
-                        avg_factors.append(pattern_df['adjustment_factor'].mean())
-        
-        plt.bar(contexts, avg_factors, color=['blue', 'green', 'red', 'purple', 'orange', 'cyan', 'magenta', 'yellow'][:len(contexts)])
-        plt.title('Average Adjustment Factor by Context')
-        plt.ylabel('Avg Factor')
-        plt.xticks(rotation=45)
-        plt.grid(True, alpha=0.3)
-        
-        # Plot 4: Day of week adjustments
-        plt.subplot(3, 3, 4)
-        if 'day_of_week' in adjustments_df.columns:
-            dow_mapping = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
-            adjustments_df['day_name'] = adjustments_df['day_of_week'].map(dow_mapping)
-            
-            dow_factors = adjustments_df.groupby('day_name')['adjustment_factor'].mean()
-            
-            # Sort by day of week
-            dow_order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-            dow_factors = dow_factors.reindex(dow_order)
-            
-            plt.bar(dow_factors.index, dow_factors.values)
-            plt.title('Average Adjustment Factor by Day of Week')
-            plt.ylabel('Avg Factor')
-            plt.grid(True, alpha=0.3)
-        
-        # Plot 5: Original vs Adjusted Forecast scatter
-        plt.subplot(3, 3, 5)
-        plt.scatter(adjustments_df['original_forecast'], 
-                   adjustments_df['adjusted_forecast'], 
-                   alpha=0.3)
-        max_val = max(adjustments_df['original_forecast'].max(), 
-                      adjustments_df['adjusted_forecast'].max())
-        plt.plot([0, max_val], [0, max_val], 'r--')  # Diagonal line
-        plt.title('Original vs Adjusted Forecast')
-        plt.xlabel('Original Forecast')
-        plt.ylabel('Adjusted Forecast')
-        plt.grid(True, alpha=0.3)
-        
-        # Plot 6: Adjustment percentage distribution
-        plt.subplot(3, 3, 6)
-        # Calculate percentage adjustments
-        pct_changes = ((adjustments_df['adjusted_forecast'] - adjustments_df['original_forecast']) 
-                      / adjustments_df['original_forecast'].clip(lower=1e-8)) * 100
-        # Remove extreme values for better visualization
-        pct_changes = pct_changes.clip(lower=-50, upper=50)
-        plt.hist(pct_changes, bins=20)
-        plt.title('Adjustment Percentage Distribution')
-        plt.xlabel('Adjustment (%)')
-        plt.ylabel('Count')
-        plt.grid(True, alpha=0.3)
-        
-        # Plot 7: Pattern-specific adjustment distributions
-        plt.subplot(3, 3, 7)
-        if 'pattern_type' in adjustments_df.columns and len(adjustments_df['pattern_type'].unique()) > 1:
-            # Count patterns
-            patterns = [p for p in adjustments_df['pattern_type'].unique() if p != "unknown"]
-            if patterns:
-                # Set up X positions
-                x = np.arange(len(self.agent.adjustment_factors))
-                width = 0.8 / len(patterns)
-                
-                for i, pattern in enumerate(patterns):
-                    pattern_df = adjustments_df[adjustments_df['pattern_type'] == pattern]
-                    # Count by action index
-                    counts = np.zeros(len(self.agent.adjustment_factors))
-                    for action_idx in range(len(self.agent.adjustment_factors)):
-                        counts[action_idx] = len(pattern_df[pattern_df['action_idx'] == action_idx])
-                    
-                    # Convert to percentages
-                    if sum(counts) > 0:
-                        counts = counts / sum(counts)
-                    
-                    # Plot with offset for each pattern
-                    offset = (i - len(patterns)/2 + 0.5) * width
-                    plt.bar(x + offset, counts, width, label=pattern)
-                
-                plt.title('Pattern-Specific Adjustment Distribution')
-                plt.xlabel('Adjustment Factor')
-                plt.ylabel('Frequency')
-                plt.xticks(x, factor_labels, rotation=45)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-            else:
-                plt.text(0.5, 0.5, "No pattern data available", ha='center', va='center')
-                plt.title('Pattern-Specific Adjustment Distribution')
-        else:
-            plt.text(0.5, 0.5, "No pattern data available", ha='center', va='center')
-            plt.title('Pattern-Specific Adjustment Distribution')
-        
-        # Plot 8: Adjustment factors by SKU (top 10 most frequently adjusted)
-        plt.subplot(3, 3, 8)
-        sku_adjustment_count = adjustments_df.groupby('sku_id').size().sort_values(ascending=False)
-        top_skus = sku_adjustment_count.index[:min(10, len(sku_adjustment_count))]
-        
-        if len(top_skus) > 0:
-            sku_factors = adjustments_df[adjustments_df['sku_id'].isin(top_skus)].groupby('sku_id')['adjustment_factor'].mean()
-            sku_factors = sku_factors.loc[top_skus]  # Ensure order matches
-            
-            plt.bar(range(len(top_skus)), sku_factors.values)
-            plt.xticks(range(len(top_skus)), sku_factors.index, rotation=90)
-            plt.title('Average Adjustment Factor by SKU (Top 10)')
-            plt.ylabel('Avg Factor')
-            plt.grid(True, alpha=0.3)
-        else:
-            plt.text(0.5, 0.5, "Insufficient SKU data", ha='center', va='center')
-            plt.title('Average Adjustment Factor by SKU')
-        
-        # Plot 9: Promotion vs No Promotion comparison
-        plt.subplot(3, 3, 9)
-        if 'is_promotion' in adjustments_df.columns:
-            promo_df = adjustments_df[adjustments_df['is_promotion'] == True]
-            non_promo_df = adjustments_df[adjustments_df['is_promotion'] == False]
-            
-            if len(promo_df) > 0 and len(non_promo_df) > 0:
-                # Group by action index for each category
-                promo_counts = np.zeros(len(self.agent.adjustment_factors))
-                non_promo_counts = np.zeros(len(self.agent.adjustment_factors))
-                
-                for action_idx in range(len(self.agent.adjustment_factors)):
-                    promo_counts[action_idx] = len(promo_df[promo_df['action_idx'] == action_idx])
-                    non_promo_counts[action_idx] = len(non_promo_df[non_promo_df['action_idx'] == action_idx])
-                
-                # Convert to percentages
-                if sum(promo_counts) > 0:
-                    promo_counts = promo_counts / sum(promo_counts)
-                if sum(non_promo_counts) > 0:
-                    non_promo_counts = non_promo_counts / sum(non_promo_counts)
-                
-                # Set up plot
-                x = np.arange(len(self.agent.adjustment_factors))
-                width = 0.35
-                
-                plt.bar(x - width/2, non_promo_counts, width, label='No Promotion')
-                plt.bar(x + width/2, promo_counts, width, label='Promotion')
-                
-                plt.title('Promotion vs Non-Promotion Adjustments')
-                plt.xlabel('Adjustment Factor')
-                plt.ylabel('Frequency')
-                plt.xticks(x, factor_labels, rotation=45)
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-            else:
-                plt.text(0.5, 0.5, "Insufficient promotion data", ha='center', va='center')
-                plt.title('Promotion vs Non-Promotion Adjustments')
-        else:
-            plt.text(0.5, 0.5, "No promotion data available", ha='center', va='center')
-            plt.title('Promotion vs Non-Promotion Adjustments')
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.log_dir, "forecast_adjustments_summary.png"))
-        plt.close()               
-    
+        return metrics
+
     def _plot_training_progress(self):
         """Create enhanced plot of training progress metrics including context-specific performance."""
         plt.figure(figsize=(20, 15))
@@ -1151,21 +790,22 @@ class ForecastTrainer:
         plt.ylabel('Improvement Ratio')
         plt.grid(True, alpha=0.3)
         
-        # Plot context-specific MAPE improvements
+        # Plot band-specific MAPE improvements
         plt.subplot(3, 3, 4)
-        plt.plot(self.holiday_metrics['mape_improvements'], 'g-', label='Holidays')
-        plt.plot(self.promo_metrics['mape_improvements'], 'r-', label='Promotions')
-        plt.title('Context-Specific MAPE Improvement')
+        for band in ['A', 'B', 'D', 'E']:  # Skip 'C' for clarity
+            plt.plot(self.band_metrics[band]['mape_improvements'], label=f'Band {band}')
+        plt.title('Band-Specific MAPE Improvement')
         plt.xlabel('Episode')
         plt.ylabel('Improvement Ratio')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
-        # Plot day-of-week MAPE improvements
+        # Plot context-specific MAPE improvements
         plt.subplot(3, 3, 5)
+        plt.plot(self.holiday_metrics['mape_improvements'], 'g-', label='Holidays')
+        plt.plot(self.promo_metrics['mape_improvements'], 'r-', label='Promotions')
         plt.plot(self.weekend_metrics['mape_improvements'], 'b-', label='Weekends')
-        plt.plot(self.weekday_metrics['mape_improvements'], 'k-', label='Weekdays')
-        plt.title('Day-of-Week MAPE Improvement')
+        plt.title('Context-Specific MAPE Improvement')
         plt.xlabel('Episode')
         plt.ylabel('Improvement Ratio')
         plt.legend()
@@ -1186,14 +826,33 @@ class ForecastTrainer:
         plt.ylabel('Frequency')
         plt.xticks(rotation=45)
         
-        # Plot context-specific action distributions
+        # Plot band-specific action distributions
         plt.subplot(3, 3, 7)
         
         # Set up bar positions
         x = np.arange(len(adj_factors))
-        width = 0.35
+        width = 0.4
+        
+        # Fast-selling vs. slow-selling bands
+        if ('bands' in action_stats and 
+            'A' in action_stats['bands'] and 
+            'E' in action_stats['bands']):
+            
+            high_band_dist = action_stats['bands']['A']['distribution']
+            low_band_dist = action_stats['bands']['E']['distribution']
+            
+            plt.bar(x - width/2, high_band_dist, width, label='Band A (Fast)')
+            plt.bar(x + width/2, low_band_dist, width, label='Band E (Slow)')
+            
+            plt.title('Band A vs Band E Adjustments')
+            plt.xlabel('Adjustment Factor')
+            plt.ylabel('Frequency')
+            plt.xticks(x, factor_labels, rotation=45)
+            plt.legend()
         
         # Plot holiday vs promotion distributions
+        plt.subplot(3, 3, 8)
+        
         if sum(action_stats['holiday']['counts']) > 0:
             plt.bar(x - width/2, action_stats['holiday']['distribution'], width, label='Holidays')
         if sum(action_stats['promotion']['counts']) > 0:
@@ -1205,36 +864,24 @@ class ForecastTrainer:
         plt.xticks(x, factor_labels, rotation=45)
         plt.legend()
         
-        # Plot weekend vs weekday distributions
-        plt.subplot(3, 3, 8)
-        
-        if sum(action_stats['weekend']['counts']) > 0:
-            plt.bar(x - width/2, action_stats['weekend']['distribution'], width, label='Weekends')
-        if sum(action_stats['weekday']['counts']) > 0:
-            plt.bar(x + width/2, action_stats['weekday']['distribution'], width, label='Weekdays')
-        
-        plt.title('Weekend vs Weekday Adjustments')
-        plt.xlabel('Adjustment Factor')
-        plt.ylabel('Frequency')
-        plt.xticks(x, factor_labels, rotation=45)
-        plt.legend()
-        
-        # Plot comparative MAPE improvements by context
+        # Plot comparative MAPE improvements by band and context
         plt.subplot(3, 3, 9)
         
         # Calculate average improvements for last 100 episodes (or all if less than 100)
         window = min(100, len(self.mape_improvements))
         avg_overall = np.mean(self.mape_improvements[-window:])
+        avg_band_A = np.mean(self.band_metrics['A']['mape_improvements'][-window:])
+        avg_band_B = np.mean(self.band_metrics['B']['mape_improvements'][-window:])
+        avg_band_D = np.mean(self.band_metrics['D']['mape_improvements'][-window:])
+        avg_band_E = np.mean(self.band_metrics['E']['mape_improvements'][-window:])
         avg_holiday = np.mean(self.holiday_metrics['mape_improvements'][-window:])
         avg_promo = np.mean(self.promo_metrics['mape_improvements'][-window:])
-        avg_weekend = np.mean(self.weekend_metrics['mape_improvements'][-window:])
-        avg_weekday = np.mean(self.weekday_metrics['mape_improvements'][-window:])
         
-        contexts = ['Overall', 'Holidays', 'Promos', 'Weekends', 'Weekdays']
-        improvements = [avg_overall, avg_holiday, avg_promo, avg_weekend, avg_weekday]
+        categories = ['Overall', 'Band A', 'Band B', 'Band D', 'Band E', 'Holidays', 'Promos']
+        improvements = [avg_overall, avg_band_A, avg_band_B, avg_band_D, avg_band_E, avg_holiday, avg_promo]
         
-        plt.bar(contexts, improvements)
-        plt.title('Avg MAPE Improvement by Context (Last 100 Episodes)')
+        plt.bar(categories, improvements)
+        plt.title(f'Avg MAPE Improvement (Last {window} Episodes)')
         plt.ylabel('Improvement Ratio')
         plt.xticks(rotation=45)
         
@@ -1302,466 +949,648 @@ class ForecastTrainer:
         plt.savefig(os.path.join(self.log_dir, 'pattern_learning.png'))
         plt.close()
     
-    def evaluate(self, num_episodes: int = 10, verbose: bool = True) -> Dict:
+    def _plot_band_learning(self):
+        """Create plot showing band-specific learning curves."""
+        plt.figure(figsize=(16, 12))
+        
+        # Plot band-specific MAPE improvements
+        plt.subplot(2, 2, 1)
+        for band in ['A', 'B', 'C', 'D', 'E']:
+            plt.plot(self.band_metrics[band]['mape_improvements'], label=f'Band {band}')
+        plt.title('Band-Specific MAPE Improvement')
+        plt.xlabel('Episode')
+        plt.ylabel('Improvement Ratio')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot band-specific bias improvements
+        plt.subplot(2, 2, 2)
+        for band in ['A', 'B', 'C', 'D', 'E']:
+            plt.plot(self.band_metrics[band]['bias_improvements'], label=f'Band {band}')
+        plt.title('Band-Specific Bias Improvement')
+        plt.xlabel('Episode')
+        plt.ylabel('Improvement Ratio')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot average MAPE improvement by band (last 100 episodes)
+        plt.subplot(2, 2, 3)
+        window = min(100, len(self.band_metrics['A']['mape_improvements']))
+        bands = ['A', 'B', 'C', 'D', 'E']
+        band_avgs = []
+        
+        for band in bands:
+            avg_imp = np.mean(self.band_metrics[band]['mape_improvements'][-window:])
+            band_avgs.append(avg_imp)
+        
+        plt.bar(bands, band_avgs)
+        plt.title(f'Avg MAPE Improvement by Band (Last {window} Episodes)')
+        plt.ylabel('Improvement Ratio')
+        
+        # Plot average Bias improvement by band (last 100 episodes)
+        plt.subplot(2, 2, 4)
+        window = min(100, len(self.band_metrics['A']['bias_improvements']))
+        bands = ['A', 'B', 'C', 'D', 'E']
+        band_bias_avgs = []
+        
+        for band in bands:
+            avg_imp = np.mean(self.band_metrics[band]['bias_improvements'][-window:])
+            band_bias_avgs.append(avg_imp)
+        
+        plt.bar(bands, band_bias_avgs)
+        plt.title(f'Avg Bias Improvement by Band (Last {window} Episodes)')
+        plt.ylabel('Improvement Ratio')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.log_dir, 'band_learning.png'))
+        plt.close()
+    
+    def generate_adjusted_forecasts(self, num_days: int = 14) -> pd.DataFrame:
         """
-        Evaluate the forecast adjustment agent with context-specific metrics.
+        Generate adjusted forecasts using the trained agent, with context-specific information.
         
         Args:
-            num_episodes: Number of episodes to evaluate
-            verbose: Whether to print progress
+            num_days: Number of days to forecast
             
         Returns:
-            Dictionary of evaluation metrics
+            DataFrame of adjusted forecasts with context information
         """
-        self.logger.info(f"Starting evaluation for {num_episodes} episodes")
+        self.logger.info(f"Generating adjusted forecasts for {num_days} days with context information")
         
-        # Evaluation metrics
-        eval_scores = []
-        eval_mape_improvements = []
-        eval_bias_improvements = []
+        # Reset environment
+        state = self.env.reset()
         
-        # Context-specific metrics
-        holiday_metrics = {
-            'scores': [], 'mape_improvements': [], 'bias_improvements': [],
-            'sku_actions': {}, 'sku_improvements': {}
-        }
-        promo_metrics = {
-            'scores': [], 'mape_improvements': [], 'bias_improvements': [],
-            'sku_actions': {}, 'sku_improvements': {}
-        }
-        weekend_metrics = {
-            'scores': [], 'mape_improvements': [], 'bias_improvements': [],
-            'sku_actions': {}, 'sku_improvements': {}
-        }
-        weekday_metrics = {
-            'scores': [], 'mape_improvements': [], 'bias_improvements': [],
-            'sku_actions': {}, 'sku_improvements': {}
-        }
+        # Get feature dimensions
+        feature_dims = self.env.get_feature_dims()
         
-        # Pattern-specific metrics
-        pattern_metrics = {}
+        # Predictions storage
+        forecast_adjustments = []
         
-        # Initialize SKU-level metrics tracking
-        sku_level_metrics = {}
-        for sku in self.env.skus:
-            sku_level_metrics[sku] = {
-                "original_mape": [],
-                "adjusted_mape": [],
-                "original_bias": [],
-                "adjusted_bias": [],
-                "actions": [],
-                "is_holiday": [],
-                "is_promotion": [],
-                "is_weekend": [],
-                "pattern_type": []
-            }
-        
-        # Evaluation loop
-        for episode in tqdm(range(1, num_episodes + 1), disable=not verbose):
-            state = self.env.reset()
-            episode_score = 0
+        for day in range(min(num_days, self.max_steps)):
+            # Get date for the current day
+            if hasattr(self.env, 'start_date'):
+                current_date = self.env.start_date + pd.Timedelta(days=day)
+                day_of_week = current_date.weekday()
+                is_weekend = day_of_week >= 5
+            else:
+                current_date = None
+                day_of_week = None
+                is_weekend = False
             
-            # Episode-specific context metrics
-            episode_holiday_metrics = {'scores': [], 'mape_imps': [], 'bias_imps': []}
-            episode_promo_metrics = {'scores': [], 'mape_imps': [], 'bias_imps': []}
-            episode_weekend_metrics = {'scores': [], 'mape_imps': [], 'bias_imps': []}
-            episode_weekday_metrics = {'scores': [], 'mape_imps': [], 'bias_imps': []}
-            
-            # Episode-specific pattern metrics
-            episode_pattern_metrics = {}
-            
-            for step in range(self.max_steps):
-                adjustments = {}
+            # Process each SKU
+            for i, sku in enumerate(self.env.skus):
+                # State features for this SKU
+                sku_state = state[i]
                 
-                # Determine adjustments for all SKUs (no exploration)
-                for i, sku in enumerate(self.env.skus):
-                    # Get feature dimensions
-                    feature_dims = self.env.get_feature_dims()
-                    forecast_dim = feature_dims[0]
-                    
-                    # State features for this SKU
-                    sku_state = state[i]
-                    
-                    # Extract calendar information
-                    calendar_features = self._extract_calendar_features(sku_state, feature_dims)
-                    is_weekend = calendar_features.get('is_weekend', False)
-                    
-                    # Get pattern type if available
-                    pattern_type = "unknown"
-                    if hasattr(self.env, 'has_pattern_types') and self.env.has_pattern_types:
-                        if sku in self.env.sku_patterns:
-                            pattern_type = self.env.sku_patterns[sku]
-                    
-                    # Get action from agent with context (no exploration)
-                    context = {
-                        'is_holiday': False,  # Will be updated after environment step
-                        'is_promotion': False,  # Will be updated after environment step
-                        'is_weekend': is_weekend,
-                        'pattern_type': pattern_type
-                    }
-                    action_idx = self.agent.act(sku_state, explore=False, context=context)
-                    
-                    # Extract forecast from state
-                    forecasts = sku_state[:forecast_dim]
-                    current_forecast = forecasts[0]  # Current day's forecast
-                    
-                    # Calculate adjusted forecast based on action
-                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, context)
-                    
-                    adjustments[sku] = (action_idx, adjusted_forecast)
-                    
-                    # Track actions for SKU
-                    sku_level_metrics[sku]["actions"].append(action_idx)
-                    sku_level_metrics[sku]["is_weekend"].append(is_weekend)
-                    sku_level_metrics[sku]["pattern_type"].append(pattern_type)
+                # Extract context information
+                context_features = self._extract_context_features(sku_state, feature_dims)
+                is_weekend_from_features = context_features.get('is_weekend', False)
+                sku_band = context_features.get('sku_band', 'C')
                 
-                # Take step in environment
-                next_state, rewards, done, info = self.env.step(adjustments)
+                # Check if this is a holiday or promotion
+                is_holiday = self.env._check_if_holiday(day) if hasattr(self.env, '_check_if_holiday') else False
+                is_promotion = self.env._check_if_promotion(sku, day) if hasattr(self.env, '_check_if_promotion') else False
                 
-                # Update episode metrics
-                episode_score += sum(rewards.values())
+                # Get pattern type if available
+                pattern_type = "unknown"
+                if hasattr(self.env, 'has_pattern_types') and self.env.has_pattern_types:
+                    if sku in self.env.sku_patterns:
+                        pattern_type = self.env.sku_patterns[sku]
                 
-                # Update SKU-level metrics
-                for sku in self.env.skus:
-                    # Basic metrics
-                    sku_level_metrics[sku]["original_mape"].append(info['original_mape'][sku])
-                    sku_level_metrics[sku]["adjusted_mape"].append(info['adjusted_mape'][sku])
-                    sku_level_metrics[sku]["original_bias"].append(info['original_bias'][sku])
-                    sku_level_metrics[sku]["adjusted_bias"].append(info['adjusted_bias'][sku])
-                    
-                    # Context flags
-                    is_holiday = info['is_holiday'].get(sku, False)
-                    is_promo = info['is_promotion'].get(sku, False)
-                    
-                    sku_level_metrics[sku]["is_holiday"].append(is_holiday)
-                    sku_level_metrics[sku]["is_promotion"].append(is_promo)
-                    
-                    # Calculate improvements
-                    mape_imp = info['original_mape'][sku] - info['adjusted_mape'][sku]
-                    bias_imp = abs(info['original_bias'][sku]) - abs(info['adjusted_bias'][sku])
-                    
-                    # Get pattern type
-                    pattern_type = info.get('pattern_type', {}).get(sku, "unknown")
-                    
-                    # Track pattern-specific metrics
-                    if pattern_type != "unknown":
-                        if pattern_type not in episode_pattern_metrics:
-                            episode_pattern_metrics[pattern_type] = {
-                                'scores': [], 'mape_imps': [], 'bias_imps': []
-                            }
-                        episode_pattern_metrics[pattern_type]['scores'].append(rewards[sku])
-                        episode_pattern_metrics[pattern_type]['mape_imps'].append(mape_imp)
-                        episode_pattern_metrics[pattern_type]['bias_imps'].append(bias_imp)
-                    
-                    # Track context-specific metrics
-                    if is_holiday:
-                        episode_holiday_metrics['scores'].append(rewards[sku])
-                        episode_holiday_metrics['mape_imps'].append(mape_imp)
-                        episode_holiday_metrics['bias_imps'].append(bias_imp)
-                        
-                        # Track per-SKU actions for holidays
-                        if sku not in holiday_metrics['sku_actions']:
-                            holiday_metrics['sku_actions'][sku] = []
-                            holiday_metrics['sku_improvements'][sku] = []
-                        
-                        action_idx, _ = adjustments[sku]
-                        holiday_metrics['sku_actions'][sku].append(action_idx)
-                        holiday_metrics['sku_improvements'][sku].append((mape_imp, bias_imp))
-                    
-                    if is_promo:
-                        episode_promo_metrics['scores'].append(rewards[sku])
-                        episode_promo_metrics['mape_imps'].append(mape_imp)
-                        episode_promo_metrics['bias_imps'].append(bias_imp)
-                        
-                        # Track per-SKU actions for promotions
-                        if sku not in promo_metrics['sku_actions']:
-                            promo_metrics['sku_actions'][sku] = []
-                            promo_metrics['sku_improvements'][sku] = []
-                        
-                        action_idx, _ = adjustments[sku]
-                        promo_metrics['sku_actions'][sku].append(action_idx)
-                        promo_metrics['sku_improvements'][sku].append((mape_imp, bias_imp))
-                    
-                    # Extract weekend status
-                    if (hasattr(self.env, 'start_date') and hasattr(self.env, 'current_step')):
-                        current_date = self.env.start_date + pd.Timedelta(days=self.env.current_step-1)
-                        is_weekend = current_date.weekday() >= 5
-                    else:
-                        is_weekend = False
-                    
-                    if is_weekend:
-                        episode_weekend_metrics['scores'].append(rewards[sku])
-                        episode_weekend_metrics['mape_imps'].append(mape_imp)
-                        episode_weekend_metrics['bias_imps'].append(bias_imp)
-                        
-                        # Track per-SKU actions for weekends
-                        if sku not in weekend_metrics['sku_actions']:
-                            weekend_metrics['sku_actions'][sku] = []
-                            weekend_metrics['sku_improvements'][sku] = []
-                        
-                        action_idx, _ = adjustments[sku]
-                        weekend_metrics['sku_actions'][sku].append(action_idx)
-                        weekend_metrics['sku_improvements'][sku].append((mape_imp, bias_imp))
-                    else:
-                        episode_weekday_metrics['scores'].append(rewards[sku])
-                        episode_weekday_metrics['mape_imps'].append(mape_imp)
-                        episode_weekday_metrics['bias_imps'].append(bias_imp)
-                        
-                        # Track per-SKU actions for weekdays
-                        if sku not in weekday_metrics['sku_actions']:
-                            weekday_metrics['sku_actions'][sku] = []
-                            weekday_metrics['sku_improvements'][sku] = []
-                        
-                        action_idx, _ = adjustments[sku]
-                        weekday_metrics['sku_actions'][sku].append(action_idx)
-                        weekday_metrics['sku_improvements'][sku].append((mape_imp, bias_imp))
-                
-                # Update state
-                state = next_state
-                
-                if done:
-                    break
-            
-            # Calculate episode improvements
-            original_mape = np.mean([info['original_mape'][sku] for sku in info['original_mape']])
-            adjusted_mape = np.mean([info['adjusted_mape'][sku] for sku in info['adjusted_mape']])
-            original_bias = np.mean([abs(info['original_bias'][sku]) for sku in info['original_bias']])
-            adjusted_bias = np.mean([abs(info['adjusted_bias'][sku]) for sku in info['adjusted_bias']])
-            
-            mape_improvement = (original_mape - adjusted_mape) / original_mape if original_mape > 0 else 0
-            bias_improvement = (original_bias - adjusted_bias) / original_bias if original_bias > 0 else 0
-            
-            # Store metrics
-            eval_scores.append(episode_score)
-            eval_mape_improvements.append(mape_improvement)
-            eval_bias_improvements.append(bias_improvement)
-            
-            # Store context-specific metrics for this episode
-            if episode_holiday_metrics['scores']:
-                holiday_metrics['scores'].append(np.mean(episode_holiday_metrics['scores']))
-                holiday_metrics['mape_improvements'].append(np.mean(episode_holiday_metrics['mape_imps']))
-                holiday_metrics['bias_improvements'].append(np.mean(episode_holiday_metrics['bias_imps']))
-            
-            if episode_promo_metrics['scores']:
-                promo_metrics['scores'].append(np.mean(episode_promo_metrics['scores']))
-                promo_metrics['mape_improvements'].append(np.mean(episode_promo_metrics['mape_imps']))
-                promo_metrics['bias_improvements'].append(np.mean(episode_promo_metrics['bias_imps']))
-            
-            if episode_weekend_metrics['scores']:
-                weekend_metrics['scores'].append(np.mean(episode_weekend_metrics['scores']))
-                weekend_metrics['mape_improvements'].append(np.mean(episode_weekend_metrics['mape_imps']))
-                weekend_metrics['bias_improvements'].append(np.mean(episode_weekend_metrics['bias_imps']))
-            
-            if episode_weekday_metrics['scores']:
-                weekday_metrics['scores'].append(np.mean(episode_weekday_metrics['scores']))
-                weekday_metrics['mape_improvements'].append(np.mean(episode_weekday_metrics['mape_imps']))
-                weekday_metrics['bias_improvements'].append(np.mean(episode_weekday_metrics['bias_imps']))
-            
-            # Store pattern-specific metrics
-            for pattern_type, metrics in episode_pattern_metrics.items():
-                if pattern_type not in pattern_metrics:
-                    pattern_metrics[pattern_type] = {
-                        'scores': [], 'mape_improvements': [], 'bias_improvements': []
-                    }
-                
-                if metrics['scores']:
-                    pattern_metrics[pattern_type]['scores'].append(np.mean(metrics['scores']))
-                    pattern_metrics[pattern_type]['mape_improvements'].append(np.mean(metrics['mape_imps']))
-                    pattern_metrics[pattern_type]['bias_improvements'].append(np.mean(metrics['bias_imps']))
-            
-            if verbose:
-                self.logger.info(f"Eval Episode {episode}/{num_episodes} | "
-                              f"Score: {episode_score:.2f} | "
-                              f"MAPE Imp: {mape_improvement:.4f} | "
-                              f"Bias Imp: {bias_improvement:.4f}")
-        
-        # Calculate aggregate metrics
-        avg_score = np.mean(eval_scores)
-        avg_mape_improvement = np.mean(eval_mape_improvements)
-        avg_bias_improvement = np.mean(eval_bias_improvements)
-        
-        # Calculate context-specific average metrics
-        context_metrics = {
-            'holiday': {
-                'avg_score': np.mean(holiday_metrics['scores']) if holiday_metrics['scores'] else 0,
-                'avg_mape_improvement': np.mean(holiday_metrics['mape_improvements']) if holiday_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(holiday_metrics['bias_improvements']) if holiday_metrics['bias_improvements'] else 0
-            },
-            'promotion': {
-                'avg_score': np.mean(promo_metrics['scores']) if promo_metrics['scores'] else 0,
-                'avg_mape_improvement': np.mean(promo_metrics['mape_improvements']) if promo_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(promo_metrics['bias_improvements']) if promo_metrics['bias_improvements'] else 0
-            },
-            'weekend': {
-                'avg_score': np.mean(weekend_metrics['scores']) if weekend_metrics['scores'] else 0,
-                'avg_mape_improvement': np.mean(weekend_metrics['mape_improvements']) if weekend_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(weekend_metrics['bias_improvements']) if weekend_metrics['bias_improvements'] else 0
-            },
-            'weekday': {
-                'avg_score': np.mean(weekday_metrics['scores']) if weekday_metrics['scores'] else 0,
-                'avg_mape_improvement': np.mean(weekday_metrics['mape_improvements']) if weekday_metrics['mape_improvements'] else 0,
-                'avg_bias_improvement': np.mean(weekday_metrics['bias_improvements']) if weekday_metrics['bias_improvements'] else 0
-            }
-        }
-        
-        # Calculate pattern-specific average metrics
-        pattern_avg_metrics = {}
-        for pattern_type, metrics in pattern_metrics.items():
-            if metrics['mape_improvements']:                                            
-                pattern_avg_metrics[pattern_type] = {
-                    'avg_score': np.mean(metrics['scores']),
-                    'avg_mape_improvement': np.mean(metrics['mape_improvements']),
-                    'avg_bias_improvement': np.mean(metrics['bias_improvements'])
+                # Build complete context
+                context = {
+                    'is_holiday': is_holiday,
+                    'is_promotion': is_promotion,
+                    'is_weekend': is_weekend or is_weekend_from_features,
+                    'pattern_type': pattern_type,
+                    'sku_band': sku_band
                 }
-        
-        # Calculate SKU-level summary
-        sku_summary = {}
-        for sku in self.env.skus:
-            # Filter metrics by context
-            holiday_indices = [i for i, is_holiday in enumerate(sku_level_metrics[sku]["is_holiday"]) if is_holiday]
-            promo_indices = [i for i, is_promo in enumerate(sku_level_metrics[sku]["is_promotion"]) if is_promo]
-            weekend_indices = [i for i, is_weekend in enumerate(sku_level_metrics[sku]["is_weekend"]) if is_weekend]
-            weekday_indices = [i for i, is_weekend in enumerate(sku_level_metrics[sku]["is_weekend"]) if not is_weekend]
-            
-            # Group by pattern type
-            pattern_indices = {}
-            for i, pattern in enumerate(sku_level_metrics[sku]["pattern_type"]):
-                if pattern != "unknown":
-                    if pattern not in pattern_indices:
-                        pattern_indices[pattern] = []
-                    pattern_indices[pattern].append(i)
-            
-            # Overall metrics
-            orig_mape = np.mean(sku_level_metrics[sku]["original_mape"])
-            adj_mape = np.mean(sku_level_metrics[sku]["adjusted_mape"])
-            orig_bias = np.mean([abs(b) for b in sku_level_metrics[sku]["original_bias"]])
-            adj_bias = np.mean([abs(b) for b in sku_level_metrics[sku]["adjusted_bias"]])
-            
-            mape_imp = (orig_mape - adj_mape) / orig_mape if orig_mape > 0 else 0
-            bias_imp = (orig_bias - adj_bias) / orig_bias if orig_bias > 0 else 0
-            
-            # Most common action
-            actions = sku_level_metrics[sku]["actions"]
-            most_common_action = np.argmax(np.bincount(actions)) if actions else 0
-            
-            # Context-specific metrics
-            holiday_mape_imp = 0
-            holiday_bias_imp = 0
-            if holiday_indices:
-                h_orig_mape = np.mean([sku_level_metrics[sku]["original_mape"][i] for i in holiday_indices])
-                h_adj_mape = np.mean([sku_level_metrics[sku]["adjusted_mape"][i] for i in holiday_indices])
-                h_orig_bias = np.mean([abs(sku_level_metrics[sku]["original_bias"][i]) for i in holiday_indices])
-                h_adj_bias = np.mean([abs(sku_level_metrics[sku]["adjusted_bias"][i]) for i in holiday_indices])
                 
-                holiday_mape_imp = (h_orig_mape - h_adj_mape) / h_orig_mape if h_orig_mape > 0 else 0
-                holiday_bias_imp = (h_orig_bias - h_adj_bias) / h_orig_bias if h_orig_bias > 0 else 0
-            
-            promo_mape_imp = 0
-            promo_bias_imp = 0
-            if promo_indices:
-                p_orig_mape = np.mean([sku_level_metrics[sku]["original_mape"][i] for i in promo_indices])
-                p_adj_mape = np.mean([sku_level_metrics[sku]["adjusted_mape"][i] for i in promo_indices])
-                p_orig_bias = np.mean([abs(sku_level_metrics[sku]["original_bias"][i]) for i in promo_indices])
-                p_adj_bias = np.mean([abs(sku_level_metrics[sku]["adjusted_bias"][i]) for i in promo_indices])
+                # Get action from agent with context (no exploration)
+                action_idx = self.agent.act(sku_state, explore=False, context=context)
                 
-                promo_mape_imp = (p_orig_mape - p_adj_mape) / p_orig_mape if p_orig_mape > 0 else 0
-                promo_bias_imp = (p_orig_bias - p_adj_bias) / p_orig_bias if p_orig_bias > 0 else 0
-            
-            # Pattern-specific metrics
-            pattern_improvements = {}
-            for pattern, indices in pattern_indices.items():
-                if indices:
-                    pat_orig_mape = np.mean([sku_level_metrics[sku]["original_mape"][i] for i in indices])
-                    pat_adj_mape = np.mean([sku_level_metrics[sku]["adjusted_mape"][i] for i in indices])
-                    pat_orig_bias = np.mean([abs(sku_level_metrics[sku]["original_bias"][i]) for i in indices])
-                    pat_adj_bias = np.mean([abs(sku_level_metrics[sku]["adjusted_bias"][i]) for i in indices])
+                # Extract forecasts from state
+                forecasts = sku_state[:feature_dims[0]]
+                
+                # For each forecast day
+                for forecast_day in range(min(len(forecasts), self.env.forecast_horizon)):
+                    original_forecast = forecasts[forecast_day]
                     
-                    pattern_improvements[pattern] = {
-                        "mape_improvement": (pat_orig_mape - pat_adj_mape) / pat_orig_mape if pat_orig_mape > 0 else 0,
-                        "bias_improvement": (pat_orig_bias - pat_adj_bias) / pat_orig_bias if pat_orig_bias > 0 else 0,
-                        "sample_count": len(indices)
-                    }
+                    # Apply adjustment factor with context
+                    adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, original_forecast, context)
+                    factor = adjusted_forecast / original_forecast if original_forecast > 0 else 1.0
+                    
+                    # Add to predictions with context information
+                    forecast_adjustments.append({
+                        'sku_id': sku,
+                        'day': day,
+                        'date': current_date.strftime('%Y-%m-%d') if current_date else None,
+                        'day_of_week': day_of_week,
+                        'is_weekend': is_weekend,
+                        'is_holiday': is_holiday,
+                        'is_promotion': is_promotion,
+                        'forecast_day': forecast_day,
+                        'original_forecast': float(original_forecast),
+                        'adjustment_factor': float(factor),
+                        'adjusted_forecast': float(adjusted_forecast),
+                        'action_idx': int(action_idx),
+                        'pattern_type': pattern_type,
+                        'sku_band': sku_band
+                    })
             
-            # Store all metrics for this SKU
-            sku_summary[sku] = {
-                "overall": {
-                    "original_mape": orig_mape,
-                    "adjusted_mape": adj_mape,
-                    "mape_improvement": mape_imp,
-                    "original_bias": orig_bias,
-                    "adjusted_bias": adj_bias,
-                    "bias_improvement": bias_imp,
-                    "common_adjustment": self.agent.adjustment_factors[most_common_action]
-                },
-                "holiday": {
-                    "mape_improvement": holiday_mape_imp,
-                    "bias_improvement": holiday_bias_imp,
-                    "sample_count": len(holiday_indices)
-                },
-                "promotion": {
-                    "mape_improvement": promo_mape_imp,
-                    "bias_improvement": promo_bias_imp,
-                    "sample_count": len(promo_indices)
-                },
-                "weekend_weekday": {
-                    "weekend_count": len(weekend_indices),
-                    "weekday_count": len(weekday_indices)
-                },
-                "patterns": pattern_improvements
-            }
+            # Calculate adjustments for environment step
+            adjustments = {}
+            for i, sku in enumerate(self.env.skus):
+                # State features
+                sku_state = state[i]
+                
+                # Extract context for this SKU
+                context_features = self._extract_context_features(sku_state, feature_dims)
+                sku_band = context_features.get('sku_band', 'C')
+                is_weekend = context_features.get('is_weekend', False)
+                
+                is_holiday = self.env._check_if_holiday(day) if hasattr(self.env, '_check_if_holiday') else False
+                is_promotion = self.env._check_if_promotion(sku, day) if hasattr(self.env, '_check_if_promotion') else False
+                
+                # Get pattern type
+                pattern_type = "unknown"
+                if hasattr(self.env, 'has_pattern_types') and self.env.has_pattern_types:
+                    if sku in self.env.sku_patterns:
+                        pattern_type = self.env.sku_patterns[sku]
+                
+                # Get action with context
+                context = {
+                    'is_holiday': is_holiday,
+                    'is_promotion': is_promotion,
+                    'is_weekend': is_weekend,
+                    'pattern_type': pattern_type,
+                    'sku_band': sku_band
+                }
+                
+                action_idx = self.agent.act(sku_state, explore=False, context=context)
+                
+                # Extract current forecast
+                current_forecast = sku_state[0]  # First forecast
+                
+                # Calculate adjusted forecast
+                adjusted_forecast = self.agent.calculate_adjusted_forecast(action_idx, current_forecast, context)
+                
+                adjustments[sku] = (action_idx, adjusted_forecast)
+            
+            # Take environment step
+            next_state, _, done, _ = self.env.step(adjustments)
+            state = next_state
+            
+            if done:
+                break
         
-        # Sort SKUs by overall improvement
-        if self.optimize_for == "mape":
-            top_skus = sorted(sku_summary.items(), key=lambda x: x[1]["overall"]["mape_improvement"], reverse=True)
-        elif self.optimize_for == "bias":
-            top_skus = sorted(sku_summary.items(), key=lambda x: x[1]["overall"]["bias_improvement"], reverse=True)
-        else:  # "both"
-            top_skus = sorted(sku_summary.items(), 
-                             key=lambda x: x[1]["overall"]["mape_improvement"] + x[1]["overall"]["bias_improvement"], 
-                             reverse=True)
+        # Convert to DataFrame
+        df = pd.DataFrame(forecast_adjustments)
         
-        # Create summary visualization
-        self._plot_evaluation_summary(context_metrics, pattern_avg_metrics, sku_summary, top_skus)
+        # Log summary statistics
+        self.logger.info(f"Generated {len(df)} forecast adjustments")
+        self.logger.info(f"Average adjustment factor: {df['adjustment_factor'].mean():.4f}")
         
-        self.logger.info(f"Evaluation complete | "
-                      f"Avg Score: {avg_score:.2f} | "
-                      f"Avg MAPE Imp: {avg_mape_improvement:.4f} | "
-                      f"Avg Bias Imp: {avg_bias_improvement:.4f}")
+        # Context-specific summaries
+        if 'is_holiday' in df.columns:
+            holiday_df = df[df['is_holiday'] == True]
+            if len(holiday_df) > 0:
+                self.logger.info(f"Holiday adjustments: {len(holiday_df)} rows, avg factor: {holiday_df['adjustment_factor'].mean():.4f}")
         
-        # Log context-specific metrics
-        self.logger.info(f"Context-specific performance:")
-        self.logger.info(f"  Holidays: MAPE Imp = {context_metrics['holiday']['avg_mape_improvement']:.4f}, "
-                      f"Bias Imp = {context_metrics['holiday']['avg_bias_improvement']:.4f}")
-        self.logger.info(f"  Promotions: MAPE Imp = {context_metrics['promotion']['avg_mape_improvement']:.4f}, "
-                      f"Bias Imp = {context_metrics['promotion']['avg_bias_improvement']:.4f}")
-        self.logger.info(f"  Weekends: MAPE Imp = {context_metrics['weekend']['avg_mape_improvement']:.4f}, "
-                      f"Bias Imp = {context_metrics['weekend']['avg_bias_improvement']:.4f}")
-        self.logger.info(f"  Weekdays: MAPE Imp = {context_metrics['weekday']['avg_mape_improvement']:.4f}, "
-                      f"Bias Imp = {context_metrics['weekday']['avg_bias_improvement']:.4f}")
+        if 'is_promotion' in df.columns:
+            promo_df = df[df['is_promotion'] == True]
+            if len(promo_df) > 0:
+                self.logger.info(f"Promotion adjustments: {len(promo_df)} rows, avg factor: {promo_df['adjustment_factor'].mean():.4f}")
         
-        # Log pattern-specific metrics
-        if pattern_avg_metrics:
-            self.logger.info(f"Pattern-specific performance:")
-            for pattern, metrics in pattern_avg_metrics.items():
-                self.logger.info(f"  {pattern}: MAPE Imp = {metrics['avg_mape_improvement']:.4f}, "
-                              f"Bias Imp = {metrics['avg_bias_improvement']:.4f}")
+        if 'is_weekend' in df.columns:
+            weekend_df = df[df['is_weekend'] == True]
+            weekday_df = df[df['is_weekend'] == False]
+            if len(weekend_df) > 0:
+                self.logger.info(f"Weekend adjustments: {len(weekend_df)} rows, avg factor: {weekend_df['adjustment_factor'].mean():.4f}")
+            if len(weekday_df) > 0:
+                self.logger.info(f"Weekday adjustments: {len(weekday_df)} rows, avg factor: {weekday_df['adjustment_factor'].mean():.4f}")
         
-        # Return metrics
-        metrics = {
-            'scores': eval_scores,
-            'mape_improvements': eval_mape_improvements,
-            'bias_improvements': eval_bias_improvements,
-            'avg_score': avg_score,
-            'avg_mape_improvement': avg_mape_improvement,
-            'avg_bias_improvement': avg_bias_improvement,
-            'context_metrics': context_metrics,
-            'pattern_metrics': pattern_avg_metrics,
-            'sku_metrics': sku_summary,
-            'top_skus': top_skus,
-            'holiday_metrics': holiday_metrics,
-            'promo_metrics': promo_metrics,
-            'weekend_metrics': weekend_metrics,
-            'weekday_metrics': weekday_metrics
-        }
+        # Band-specific summaries
+        if 'sku_band' in df.columns:
+            for band in df['sku_band'].unique():
+                band_df = df[df['sku_band'] == band]
+                if len(band_df) > 0:
+                    self.logger.info(f"Band {band} adjustments: {len(band_df)} rows, avg factor: {band_df['adjustment_factor'].mean():.4f}")
         
-        return metrics
+        # Pattern-specific summaries
+        if 'pattern_type' in df.columns:
+            for pattern in df['pattern_type'].unique():
+                if pattern != "unknown":
+                    pattern_df = df[df['pattern_type'] == pattern]
+                    if len(pattern_df) > 0:
+                        self.logger.info(f"{pattern} adjustments: {len(pattern_df)} rows, avg factor: {pattern_df['adjustment_factor'].mean():.4f}")
+        
+        # Save visualizations
+        self._visualize_forecast_adjustments(df)
+        
+        return df
+        
+    def _visualize_forecast_adjustments(self, adjustments_df: pd.DataFrame):
+        """
+        Create visualizations for the generated forecast adjustments.
+        
+        Args:
+            adjustments_df: DataFrame of adjustments
+        """
+        plt.figure(figsize=(24, 20))
+        
+        # Plot 1: Distribution of adjustment factors
+        plt.subplot(4, 3, 1)
+        adjustment_counts = adjustments_df['action_idx'].value_counts().sort_index()
+        factors = self.agent.adjustment_factors
+        
+        factor_labels = [f"{f:.1f}x" for f in factors]
+        counts = [adjustment_counts.get(i, 0) for i in range(len(factors))]
+        plt.bar(factor_labels, counts)
+        plt.title('Overall Adjustment Factor Distribution')
+        plt.ylabel('Count')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 2: Average adjustment by day
+        plt.subplot(4, 3, 2)
+        if 'day' in adjustments_df.columns:
+            day_factors = adjustments_df.groupby('day')['adjustment_factor'].mean()
+            plt.plot(day_factors.index, day_factors.values, 'o-')
+            plt.title('Average Adjustment Factor by Day')
+            plt.xlabel('Day')
+            plt.ylabel('Avg Factor')
+            plt.grid(True, alpha=0.3)
+        
+        # Plot 3: Band-specific adjustments
+        plt.subplot(4, 3, 3)
+        
+        band_avgs = []
+        bands = []
+        
+        if 'sku_band' in adjustments_df.columns:
+            for band in sorted(adjustments_df['sku_band'].unique()):
+                band_df = adjustments_df[adjustments_df['sku_band'] == band]
+                if len(band_df) > 0:
+                    bands.append(band)
+                    band_avgs.append(band_df['adjustment_factor'].mean())
+        
+        if bands:
+            plt.bar(bands, band_avgs, color=['blue', 'green', 'gray', 'orange', 'red'][:len(bands)])
+            plt.title('Average Adjustment Factor by SKU Band')
+            plt.ylabel('Avg Factor')
+            plt.grid(True, alpha=0.3)
+            
+            # Add value labels
+            for i, v in enumerate(band_avgs):
+                plt.text(i, v + 0.01, f"{v:.2f}", ha='center')
+        
+        # Plot 4: Day of week adjustments
+        plt.subplot(4, 3, 4)
+        if 'day_of_week' in adjustments_df.columns:
+            dow_mapping = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
+            adjustments_df['day_name'] = adjustments_df['day_of_week'].map(dow_mapping)
+            
+            dow_factors = adjustments_df.groupby('day_name')['adjustment_factor'].mean()
+            
+            # Sort by day of week
+            dow_order = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+            dow_factors = dow_factors.reindex(dow_order)
+            
+            plt.bar(dow_factors.index, dow_factors.values)
+            plt.title('Average Adjustment Factor by Day of Week')
+            plt.ylabel('Avg Factor')
+            plt.grid(True, alpha=0.3)
+        
+        # Plot 5: Context-specific adjustments
+        plt.subplot(4, 3, 5)
+        
+        contexts = []
+        avg_factors = []
+        
+        # Add overall average
+        contexts.append('Overall')
+        avg_factors.append(adjustments_df['adjustment_factor'].mean())
+        
+        # Add holiday average if present
+        if 'is_holiday' in adjustments_df.columns:
+            holiday_df = adjustments_df[adjustments_df['is_holiday'] == True]
+            if len(holiday_df) > 0:
+                contexts.append('Holiday')
+                avg_factors.append(holiday_df['adjustment_factor'].mean())
+        
+        # Add promotion average if present
+        if 'is_promotion' in adjustments_df.columns:
+            promo_df = adjustments_df[adjustments_df['is_promotion'] == True]
+            if len(promo_df) > 0:
+                contexts.append('Promo')
+                avg_factors.append(promo_df['adjustment_factor'].mean())
+        
+        # Add weekend/weekday averages if present
+        if 'is_weekend' in adjustments_df.columns:
+            weekend_df = adjustments_df[adjustments_df['is_weekend'] == True]
+            weekday_df = adjustments_df[adjustments_df['is_weekend'] == False]
+            
+            if len(weekend_df) > 0:
+                contexts.append('Weekend')
+                avg_factors.append(weekend_df['adjustment_factor'].mean())
+            
+            if len(weekday_df) > 0:
+                contexts.append('Weekday')
+                avg_factors.append(weekday_df['adjustment_factor'].mean())
+        
+        plt.bar(contexts, avg_factors, color=['blue', 'green', 'red', 'purple', 'orange'][:len(contexts)])
+        plt.title('Average Adjustment Factor by Context')
+        plt.ylabel('Avg Factor')
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 6: Adjustment percentage distribution
+        plt.subplot(4, 3, 6)
+        # Calculate percentage adjustments
+        pct_changes = ((adjustments_df['adjusted_forecast'] - adjustments_df['original_forecast']) 
+                     / adjustments_df['original_forecast'].clip(lower=1e-8)) * 100
+        # Remove extreme values for better visualization
+        pct_changes = pct_changes.clip(lower=-50, upper=50)
+        plt.hist(pct_changes, bins=20)
+        plt.title('Adjustment Percentage Distribution')
+        plt.xlabel('Adjustment (%)')
+        plt.ylabel('Count')
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 7: Band-specific adjustment distributions
+        plt.subplot(4, 3, 7)
+        if 'sku_band' in adjustments_df.columns and len(adjustments_df['sku_band'].unique()) > 1:
+            # Count bands
+            bands = ['A', 'B', 'C', 'D', 'E']
+            existing_bands = [b for b in bands if b in adjustments_df['sku_band'].unique()]
+            
+            if len(existing_bands) >= 2:  # At least 2 bands to compare
+                # Set up X positions
+                x = np.arange(len(self.agent.adjustment_factors))
+                width = 0.8 / len(existing_bands)
+                
+                # For visualizing only high and low bands
+                high_band = existing_bands[0]  # A or B
+                low_band = existing_bands[-1]   # D or E
+                
+                high_df = adjustments_df[adjustments_df['sku_band'] == high_band]
+                low_df = adjustments_df[adjustments_df['sku_band'] == low_band]
+                
+                # Count by action index for each band
+                high_counts = np.zeros(len(self.agent.adjustment_factors))
+                low_counts = np.zeros(len(self.agent.adjustment_factors))
+                
+                for action_idx in range(len(self.agent.adjustment_factors)):
+                    high_counts[action_idx] = len(high_df[high_df['action_idx'] == action_idx])
+                    low_counts[action_idx] = len(low_df[low_df['action_idx'] == action_idx])
+                
+                # Convert to percentages
+                if sum(high_counts) > 0:
+                    high_counts = high_counts / sum(high_counts)
+                if sum(low_counts) > 0:
+                    low_counts = low_counts / sum(low_counts)
+                
+                # Plot with offset for each band
+                plt.bar(x - width/2, high_counts, width, label=f'Band {high_band} (Fast)')
+                plt.bar(x + width/2, low_counts, width, label=f'Band {low_band} (Slow)')
+                
+                plt.title(f'Band {high_band} vs Band {low_band} Adjustment Distribution')
+                plt.xlabel('Adjustment Factor')
+                plt.ylabel('Frequency')
+                plt.xticks(x, factor_labels, rotation=45)
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+            else:
+                plt.text(0.5, 0.5, "Insufficient band data for comparison", ha='center', va='center')
+                plt.title('Band-Specific Adjustment Distribution')
+        else:
+            plt.text(0.5, 0.5, "No band data available", ha='center', va='center')
+            plt.title('Band-Specific Adjustment Distribution')
+        
+        # Plot 8: Pattern-specific adjustment distributions
+        plt.subplot(4, 3, 8)
+        if 'pattern_type' in adjustments_df.columns and len(adjustments_df['pattern_type'].unique()) > 1:
+            # Count patterns
+            patterns = [p for p in adjustments_df['pattern_type'].unique() if p != "unknown"]
+            if patterns and len(patterns) <= 3:  # Limit to 3 patterns for readability
+                # Set up X positions
+                x = np.arange(len(self.agent.adjustment_factors))
+                width = 0.8 / len(patterns)
+                
+                for i, pattern in enumerate(patterns):
+                    pattern_df = adjustments_df[adjustments_df['pattern_type'] == pattern]
+                    # Count by action index
+                    counts = np.zeros(len(self.agent.adjustment_factors))
+                    for action_idx in range(len(self.agent.adjustment_factors)):
+                        counts[action_idx] = len(pattern_df[pattern_df['action_idx'] == action_idx])
+                    
+                    # Convert to percentages
+                    if sum(counts) > 0:
+                        counts = counts / sum(counts)
+                    
+                    # Plot with offset for each pattern
+                    offset = (i - len(patterns)/2 + 0.5) * width
+                    plt.bar(x + offset, counts, width, label=pattern)
+                
+                plt.title('Pattern-Specific Adjustment Distribution')
+                plt.xlabel('Adjustment Factor')
+                plt.ylabel('Frequency')
+                plt.xticks(x, factor_labels, rotation=45)
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+            else:
+                plt.text(0.5, 0.5, "Too many patterns for visualization", ha='center', va='center')
+                plt.title('Pattern-Specific Adjustment Distribution')
+        else:
+            plt.text(0.5, 0.5, "No pattern data available", ha='center', va='center')
+            plt.title('Pattern-Specific Adjustment Distribution')
+        
+        # Plot 9: Holiday vs Non-Holiday comparison
+        plt.subplot(4, 3, 9)
+        if 'is_holiday' in adjustments_df.columns:
+            holiday_df = adjustments_df[adjustments_df['is_holiday'] == True]
+            non_holiday_df = adjustments_df[adjustments_df['is_holiday'] == False]
+            
+            if len(holiday_df) > 0 and len(non_holiday_df) > 0:
+                # Group by action index for each category
+                holiday_counts = np.zeros(len(self.agent.adjustment_factors))
+                non_holiday_counts = np.zeros(len(self.agent.adjustment_factors))
+                
+                for action_idx in range(len(self.agent.adjustment_factors)):
+                    holiday_counts[action_idx] = len(holiday_df[holiday_df['action_idx'] == action_idx])
+                    non_holiday_counts[action_idx] = len(non_holiday_df[non_holiday_df['action_idx'] == action_idx])
+                
+                # Convert to percentages
+                if sum(holiday_counts) > 0:
+                    holiday_counts = holiday_counts / sum(holiday_counts)
+                if sum(non_holiday_counts) > 0:
+                    non_holiday_counts = non_holiday_counts / sum(non_holiday_counts)
+                
+                # Set up plot
+                x = np.arange(len(self.agent.adjustment_factors))
+                width = 0.35
+                
+                plt.bar(x - width/2, non_holiday_counts, width, label='Non-Holiday')
+                plt.bar(x + width/2, holiday_counts, width, label='Holiday')
+                
+                plt.title('Holiday vs Non-Holiday Adjustments')
+                plt.xlabel('Adjustment Factor')
+                plt.ylabel('Frequency')
+                plt.xticks(x, factor_labels, rotation=45)
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+            else:
+                plt.text(0.5, 0.5, "Insufficient holiday data for comparison", ha='center', va='center')
+                plt.title('Holiday vs Non-Holiday Adjustments')
+        else:
+            plt.text(0.5, 0.5, "No holiday data available", ha='center', va='center')
+            plt.title('Holiday vs Non-Holiday Adjustments')
+        
+        # Plot 10: Promotion vs Non-Promotion comparison
+        plt.subplot(4, 3, 10)
+        if 'is_promotion' in adjustments_df.columns:
+            promo_df = adjustments_df[adjustments_df['is_promotion'] == True]
+            non_promo_df = adjustments_df[adjustments_df['is_promotion'] == False]
+            
+            if len(promo_df) > 0 and len(non_promo_df) > 0:
+                # Group by action index for each category
+                promo_counts = np.zeros(len(self.agent.adjustment_factors))
+                non_promo_counts = np.zeros(len(self.agent.adjustment_factors))
+                
+                for action_idx in range(len(self.agent.adjustment_factors)):
+                    promo_counts[action_idx] = len(promo_df[promo_df['action_idx'] == action_idx])
+                    non_promo_counts[action_idx] = len(non_promo_df[non_promo_df['action_idx'] == action_idx])
+                
+                # Convert to percentages
+                if sum(promo_counts) > 0:
+                    promo_counts = promo_counts / sum(promo_counts)
+                if sum(non_promo_counts) > 0:
+                    non_promo_counts = non_promo_counts / sum(non_promo_counts)
+                
+                # Set up plot
+                x = np.arange(len(self.agent.adjustment_factors))
+                width = 0.35
+                
+                plt.bar(x - width/2, non_promo_counts, width, label='Non-Promotion')
+                plt.bar(x + width/2, promo_counts, width, label='Promotion')
+                
+                plt.title('Promotion vs Non-Promotion Adjustments')
+                plt.xlabel('Adjustment Factor')
+                plt.ylabel('Frequency')
+                plt.xticks(x, factor_labels, rotation=45)
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+            else:
+                plt.text(0.5, 0.5, "Insufficient promotion data for comparison", ha='center', va='center')
+                plt.title('Promotion vs Non-Promotion Adjustments')
+        else:
+            plt.text(0.5, 0.5, "No promotion data available", ha='center', va='center')
+            plt.title('Promotion vs Non-Promotion Adjustments')
+        
+        # Plot 11: SKU band comparison for holidays and weekends
+        plt.subplot(4, 3, 11)
+        if ('sku_band' in adjustments_df.columns and 
+            'is_holiday' in adjustments_df.columns and 
+            'is_weekend' in adjustments_df.columns):
+            
+            # Fast vs slow selling bands on special days
+            high_band = 'A'
+            low_band = 'E'
+            
+            # Filter data
+            high_special = adjustments_df[(adjustments_df['sku_band'] == high_band) & 
+                                         ((adjustments_df['is_holiday'] == True) | 
+                                          (adjustments_df['is_weekend'] == True))]
+            
+            low_special = adjustments_df[(adjustments_df['sku_band'] == low_band) & 
+                                        ((adjustments_df['is_holiday'] == True) | 
+                                         (adjustments_df['is_weekend'] == True))]
+            
+            high_regular = adjustments_df[(adjustments_df['sku_band'] == high_band) & 
+                                         (adjustments_df['is_holiday'] == False) & 
+                                         (adjustments_df['is_weekend'] == False)]
+            
+            low_regular = adjustments_df[(adjustments_df['sku_band'] == low_band) & 
+                                        (adjustments_df['is_holiday'] == False) & 
+                                        (adjustments_df['is_weekend'] == False)]
+            
+            # Check if we have enough data for each category
+            categories = []
+            values = []
+            
+            if len(high_special) > 0:
+                categories.append(f"{high_band} Special")
+                values.append(high_special['adjustment_factor'].mean())
+                
+            if len(high_regular) > 0:
+                categories.append(f"{high_band} Regular")
+                values.append(high_regular['adjustment_factor'].mean())
+                
+            if len(low_special) > 0:
+                categories.append(f"{low_band} Special")
+                values.append(low_special['adjustment_factor'].mean())
+                
+            if len(low_regular) > 0:
+                categories.append(f"{low_band} Regular")
+                values.append(low_regular['adjustment_factor'].mean())
+            
+            if len(categories) >= 2:  # Need at least two categories to compare
+                colors = ['darkred', 'lightcoral', 'darkblue', 'lightblue'][:len(categories)]
+                plt.bar(categories, values, color=colors)
+                plt.title(f'Band Comparison: Special vs Regular Days')
+                plt.ylabel('Avg Adjustment Factor')
+                plt.grid(True, alpha=0.3)
+                
+                # Add value labels
+                for i, v in enumerate(values):
+                    plt.text(i, v + 0.01, f"{v:.2f}", ha='center')
+            else:
+                plt.text(0.5, 0.5, "Insufficient data for comparison", ha='center', va='center')
+                plt.title('Band Comparison: Special vs Regular Days')
+        else:
+            plt.text(0.5, 0.5, "Missing required data for comparison", ha='center', va='center')
+            plt.title('Band Comparison: Special vs Regular Days')
+        
+        # Plot 12: Original vs Adjusted total forecast volume by band
+        plt.subplot(4, 3, 12)
+        if 'sku_band' in adjustments_df.columns:
+            # Group by band and calculate total original and adjusted forecast
+            band_totals = adjustments_df.groupby('sku_band').agg({
+                'original_forecast': 'sum',
+                'adjusted_forecast': 'sum'
+            }).reset_index()
+            
+            if not band_totals.empty:
+                bands = band_totals['sku_band'].tolist()
+                orig_totals = band_totals['original_forecast'].tolist()
+                adj_totals = band_totals['adjusted_forecast'].tolist()
+                
+                x = np.arange(len(bands))
+                width = 0.35
+                
+                plt.bar(x - width/2, orig_totals, width, label='Original', color='royalblue')
+                plt.bar(x + width/2, adj_totals, width, label='Adjusted', color='tomato')
+                
+                plt.title('Total Forecast Volume by Band')
+                plt.xlabel('SKU Band')
+                plt.ylabel('Total Volume')
+                plt.xticks(x, bands)
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                
+                # Add percentage change labels
+                for i, (orig, adj) in enumerate(zip(orig_totals, adj_totals)):
+                    pct_change = ((adj - orig) / orig * 100) if orig > 0 else 0
+                    plt.text(i, max(orig, adj) + 0.05 * max(orig_totals + adj_totals), 
+                            f"{pct_change:.1f}%", ha='center')
+            else:
+                plt.text(0.5, 0.5, "Insufficient data for comparison", ha='center', va='center')
+                plt.title('Total Forecast Volume by Band')
+        else:
+            plt.text(0.5, 0.5, "No band data available", ha='center', va='center')
+            plt.title('Total Forecast Volume by Band')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.log_dir, "forecast_adjustments_summary.png"))
+        plt.close()

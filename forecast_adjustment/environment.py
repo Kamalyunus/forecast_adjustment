@@ -1,6 +1,6 @@
 """
 Enhanced Forecast Training Environment - Environment for training forecast adjustment
-with improved reward structure and better pattern detection.
+with SKU banding (A-E) for better inventory management.
 """
 
 import numpy as np
@@ -13,27 +13,30 @@ from datetime import datetime, timedelta
 class ForecastEnvironment:
     """
     Environment for training RL agents to adjust forecasts using historical forecasts
-    and evaluating complete forecast horizons against actual data.
+    and evaluating complete forecast horizons against actual data, with support for SKU banding.
     """
     
     def __init__(self, 
                 forecast_data: pd.DataFrame,
-                actual_data: pd.DataFrame,  # Actual values for all dates
+                actual_data: pd.DataFrame,
+                sku_band_data: Optional[pd.DataFrame] = None,  # New: SKU banding information
                 holiday_data: Optional[pd.DataFrame] = None,
                 promotion_data: Optional[pd.DataFrame] = None,
                 forecast_horizon: int = 14,
                 optimize_for: str = "both",  # "mape", "bias", or "both"
                 start_date: Optional[str] = None,
                 end_date: Optional[str] = None,
-                reward_scaling: float = 5.0,  # New parameter to scale rewards
-                pattern_emphasis: float = 1.5,  # New parameter to emphasize pattern recognition
+                reward_scaling: float = 5.0,
+                pattern_emphasis: float = 1.5,
+                band_emphasis: float = 1.8,  # New: Emphasis for band-specific rewards
                 logger: Optional[logging.Logger] = None):
         """
-        Initialize the forecast adjustment environment.
+        Initialize the forecast adjustment environment with SKU banding support.
         
         Args:
             forecast_data: DataFrame with forecast data (must have forecast_date and ml_day_X columns)
             actual_data: DataFrame with actual values (must have date and actual_value columns)
+            sku_band_data: Optional DataFrame with SKU band information (A-E)
             holiday_data: Optional DataFrame with holiday information
             promotion_data: Optional DataFrame with promotion information
             forecast_horizon: Number of days in the forecast horizon
@@ -42,6 +45,7 @@ class ForecastEnvironment:
             end_date: Ending date for historical forecasts (format: 'YYYY-MM-DD')
             reward_scaling: Factor to scale rewards (higher = stronger signal)
             pattern_emphasis: Factor to emphasize pattern-specific rewards
+            band_emphasis: Factor to emphasize band-specific reward scaling
             logger: Optional logger instance
         """
         self.forecast_data = forecast_data
@@ -50,6 +54,7 @@ class ForecastEnvironment:
         self.optimize_for = optimize_for
         self.reward_scaling = reward_scaling
         self.pattern_emphasis = pattern_emphasis
+        self.band_emphasis = band_emphasis
         
         # Set up logger
         if logger is None:
@@ -67,7 +72,16 @@ class ForecastEnvironment:
         if 'date' not in self.actual_data.columns or 'sku_id' not in self.actual_data.columns or 'actual_value' not in self.actual_data.columns:
             self.logger.error("Actual data must contain 'date', 'sku_id', and 'actual_value' columns")
             raise ValueError("Actual data must contain 'date', 'sku_id', and 'actual_value' columns")
-            
+        
+        # Extract SKUs
+        self.skus = self.forecast_data['sku_id'].unique().tolist()
+        self.logger.info(f"Environment initialized with {len(self.skus)} SKUs")
+
+        # Process SKU band data if provided
+        self.sku_bands = {}
+        if sku_band_data is not None:
+            self._setup_sku_bands(sku_band_data)
+        
         # Check for pattern_type column in actual_data - useful for specialized learning
         self.has_pattern_types = 'pattern_type' in self.actual_data.columns
         if self.has_pattern_types:
@@ -116,10 +130,6 @@ class ForecastEnvironment:
             
         self.logger.info(f"Environment initialized with {len(self.forecast_dates)} forecast generation dates")
         
-        # Extract SKUs
-        self.skus = self.forecast_data['sku_id'].unique().tolist()
-        self.logger.info(f"Environment initialized with {len(self.skus)} SKUs")
-        
         # Extract ML forecast columns
         self.ml_cols = [col for col in self.forecast_data.columns if col.startswith('ml_day_')]
         if len(self.ml_cols) < self.forecast_horizon:
@@ -129,12 +139,12 @@ class ForecastEnvironment:
         self.accuracy_cols = [col for col in self.forecast_data.columns if col.startswith('ml_mape') or col.startswith('ml_bias')]
         
         # Process holiday data if provided
-        self.holiday_calendar = None
+        self.holiday_calendar = {}
         if holiday_data is not None:
             self._setup_holiday_calendar(holiday_data)
         
         # Process promotion data if provided
-        self.promotion_schedule = None
+        self.promotion_schedule = {}
         if promotion_data is not None:
             self._setup_promotion_schedule(promotion_data)
         
@@ -162,6 +172,15 @@ class ForecastEnvironment:
                     'adjusted_bias': []
                 }
         
+        # NEW: Performance tracking for each band
+        self.band_performance = {
+            'A': {'original_mape': [], 'adjusted_mape': [], 'original_bias': [], 'adjusted_bias': []},
+            'B': {'original_mape': [], 'adjusted_mape': [], 'original_bias': [], 'adjusted_bias': []},
+            'C': {'original_mape': [], 'adjusted_mape': [], 'original_bias': [], 'adjusted_bias': []},
+            'D': {'original_mape': [], 'adjusted_mape': [], 'original_bias': [], 'adjusted_bias': []},
+            'E': {'original_mape': [], 'adjusted_mape': [], 'original_bias': [], 'adjusted_bias': []}
+        }
+        
         # Track day-of-week performance 
         self.dow_performance = {i: {'original_mape': [], 'adjusted_mape': [], 'count': 0} for i in range(7)}
         
@@ -169,6 +188,44 @@ class ForecastEnvironment:
         self.baseline_mape = None
         self.baseline_bias = None
         self.total_improvement = 0.0
+    
+    def _setup_sku_bands(self, sku_band_data: pd.DataFrame):
+        """
+        Process SKU band data into a usable format.
+        
+        Args:
+            sku_band_data: DataFrame with columns 'sku_id' and 'band'
+        """
+        self.logger.info("Setting up SKU band information")
+        
+        # Extract required columns
+        if 'sku_id' not in sku_band_data.columns or 'band' not in sku_band_data.columns:
+            self.logger.error("SKU band data must contain 'sku_id' and 'band' columns")
+            raise ValueError("SKU band data must contain 'sku_id' and 'band' columns")
+        
+        # Store band information for each SKU
+        for _, row in sku_band_data.iterrows():
+            sku_id = row['sku_id']
+            band = row['band']
+            
+            if band not in ['A', 'B', 'C', 'D', 'E']:
+                self.logger.warning(f"Unknown band '{band}' for SKU {sku_id}, defaulting to 'C'")
+                band = 'C'
+                
+            self.sku_bands[sku_id] = band
+        
+        # For SKUs without band information, default to 'C'
+        for sku in self.skus:
+            if sku not in self.sku_bands:
+                self.sku_bands[sku] = 'C'
+                
+        # Count SKUs in each band
+        band_counts = {band: 0 for band in ['A', 'B', 'C', 'D', 'E']}
+        for band in self.sku_bands.values():
+            band_counts[band] += 1
+            
+        for band, count in band_counts.items():
+            self.logger.info(f"Band {band}: {count} SKUs")
     
     def _setup_actual_values(self):
         """
@@ -190,13 +247,68 @@ class ForecastEnvironment:
         
         self.logger.info(f"Actual values prepared for {len(self.actual_values)} SKUs")
     
-    def get_feature_dims(self) -> Tuple[int, int, int, int, int, int, int]:
+    def _setup_holiday_calendar(self, holiday_data: pd.DataFrame):
+        """
+        Process holiday data into a usable format.
+        
+        Args:
+            holiday_data: DataFrame with columns 'date' and 'holiday_name'
+        """
+        self.logger.info("Setting up holiday calendar")
+        
+        # Process holiday data
+        try:
+            for _, row in holiday_data.iterrows():
+                holiday_date = pd.to_datetime(row['date'])
+                holiday_name = row['holiday_name']
+                
+                self.holiday_calendar[holiday_date] = holiday_name
+            
+            self.logger.info(f"Processed {len(self.holiday_calendar)} holidays")
+        except Exception as e:
+            self.logger.warning(f"Error processing holiday data: {str(e)}")
+    
+    def _setup_promotion_schedule(self, promotion_data: pd.DataFrame):
+        """
+        Process promotion data into a usable format.
+        
+        Args:
+            promotion_data: DataFrame with columns 'sku_id', 'start_date', 'end_date', 'promo_type'
+        """
+        self.logger.info("Setting up promotion schedule")
+        
+        # Process promotion data
+        try:
+            for _, row in promotion_data.iterrows():
+                sku = row['sku_id']
+                
+                # Skip if SKU not in our dataset
+                if sku not in self.skus:
+                    continue
+                
+                # Convert dates
+                start_date = pd.to_datetime(row['start_date'])
+                end_date = pd.to_datetime(row['end_date'])
+                promo_type = row.get('promo_type', 'generic')
+                
+                # Store promotion information for each date in the range
+                current_date = start_date
+                while current_date <= end_date:
+                    key = (sku, current_date)
+                    self.promotion_schedule[key] = promo_type
+                    current_date += pd.Timedelta(days=1)
+            
+            self.logger.info(f"Processed {len(self.promotion_schedule)} promotion days")
+        except Exception as e:
+            self.logger.warning(f"Error processing promotion data: {str(e)}")
+    
+    def get_feature_dims(self) -> Tuple[int, int, int, int, int, int, int, int]:
         """
         Get dimensions of the state features.
         
         Returns:
             Tuple of (forecast_dim, error_metrics_dim, calendar_dim, holiday_dim, 
-                     promo_dim, horizon_position_dim, total_feature_dim)
+                     promo_dim, horizon_position_dim, band_dim, total_feature_dim)
         """
         forecast_dim = min(len(self.ml_cols), self.forecast_horizon)
         error_metrics_dim = len(self.accuracy_cols)
@@ -213,16 +325,23 @@ class ForecastEnvironment:
         # Horizon position indicator: one-hot encoding of which day in the horizon
         horizon_position_dim = self.forecast_horizon
         
-        # Total dimensions
-        total_dim = forecast_dim + error_metrics_dim + calendar_dim + holiday_dim + promo_dim + horizon_position_dim
+        # NEW: Band features: one-hot encoding of band (A-E)
+        band_dim = 5
         
-        return forecast_dim, error_metrics_dim, calendar_dim, holiday_dim, promo_dim, horizon_position_dim, total_dim
+        # Total dimensions
+        total_dim = forecast_dim + error_metrics_dim + calendar_dim + holiday_dim + promo_dim + horizon_position_dim + band_dim
+        
+        return forecast_dim, error_metrics_dim, calendar_dim, holiday_dim, promo_dim, horizon_position_dim, band_dim, total_dim
     
     def _get_pattern_type(self, sku: str) -> str:
         """Get the pattern type for a specific SKU."""
         if self.has_pattern_types and sku in self.sku_patterns:
             return self.sku_patterns[sku]
         return "unknown"
+    
+    def _get_sku_band(self, sku: str) -> str:
+        """Get the band (A-E) for a specific SKU."""
+        return self.sku_bands.get(sku, 'C')  # Default to 'C' if unknown
     
     def _get_sku_state(self, sku: str, forecast_date: pd.Timestamp, horizon_day: int) -> np.ndarray:
         """
@@ -244,7 +363,7 @@ class ForecastEnvironment:
         
         if sku_forecasts.empty:
             # Default state if SKU not found
-            forecast_dim, error_dim, calendar_dim, holiday_dim, promo_dim, horizon_dim, total_dim = self.get_feature_dims()
+            forecast_dim, error_dim, calendar_dim, holiday_dim, promo_dim, horizon_dim, band_dim, total_dim = self.get_feature_dims()
             return np.zeros(total_dim)
         
         # Use the first matching row
@@ -310,6 +429,12 @@ class ForecastEnvironment:
         if 0 <= horizon_day < self.forecast_horizon:
             horizon_position[horizon_day] = 1.0
         
+        # 7. NEW: Add band indicator (one-hot encoding)
+        band = self._get_sku_band(sku)
+        band_indicator = np.zeros(5)  # A-E: 5 bands
+        band_index = {'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4}.get(band, 2)  # Default to C (index 2)
+        band_indicator[band_index] = 1.0
+        
         # Combine all features
         state = np.concatenate([
             forecasts, 
@@ -317,7 +442,8 @@ class ForecastEnvironment:
             calendar_flat,
             holiday_indicators,
             promo_indicators,
-            horizon_position
+            horizon_position,
+            band_indicator
         ]).astype(np.float32)
         
         return state
@@ -361,9 +487,7 @@ class ForecastEnvironment:
         Returns:
             True if the date is a holiday
         """
-        if self.holiday_calendar and date in self.holiday_calendar:
-            return self.holiday_calendar[date]
-        return False
+        return date in self.holiday_calendar
     
     def _check_if_promotion(self, sku: str, date: pd.Timestamp) -> bool:
         """
@@ -376,75 +500,8 @@ class ForecastEnvironment:
         Returns:
             True if the SKU is on promotion
         """
-        if self.promotion_schedule:
-            key = (sku, date)
-            return key in self.promotion_schedule
-        return False
-    
-    def _setup_holiday_calendar(self, holiday_data: pd.DataFrame):
-        """
-        Process holiday data into a usable format.
-        
-        Args:
-            holiday_data: DataFrame with columns 'date' and 'holiday_name'
-        """
-        self.logger.info("Setting up holiday calendar")
-        
-        # Initialize holiday calendar
-        self.holiday_calendar = {}
-        self.holiday_names = {}
-        
-        # Process holiday data
-        try:
-            for _, row in holiday_data.iterrows():
-                holiday_date = pd.to_datetime(row['date'])
-                holiday_name = row['holiday_name']
-                
-                self.holiday_calendar[holiday_date] = True
-                self.holiday_names[holiday_date] = holiday_name
-            
-            self.logger.info(f"Processed {len(self.holiday_calendar)} holidays")
-        except Exception as e:
-            self.logger.warning(f"Error processing holiday data: {str(e)}")
-    
-    def _setup_promotion_schedule(self, promotion_data: pd.DataFrame):
-        """
-        Process promotion data into a usable format.
-        
-        Args:
-            promotion_data: DataFrame with columns 'sku_id', 'start_date', 'end_date', 'promo_type'
-        """
-        self.logger.info("Setting up promotion schedule")
-        
-        # Initialize promotion schedule
-        self.promotion_schedule = {}
-        self.promotion_types = {}
-        
-        # Process promotion data
-        try:
-            for _, row in promotion_data.iterrows():
-                sku = row['sku_id']
-                
-                # Skip if SKU not in our dataset
-                if sku not in self.skus:
-                    continue
-                
-                # Convert dates
-                start_date = pd.to_datetime(row['start_date'])
-                end_date = pd.to_datetime(row['end_date'])
-                promo_type = row.get('promo_type', 'generic')
-                
-                # Store promotion information for each date in the range
-                current_date = start_date
-                while current_date <= end_date:
-                    key = (sku, current_date)
-                    self.promotion_schedule[key] = True
-                    self.promotion_types[key] = promo_type
-                    current_date += pd.Timedelta(days=1)
-            
-            self.logger.info(f"Processed {len(self.promotion_schedule)} promotion days")
-        except Exception as e:
-            self.logger.warning(f"Error processing promotion data: {str(e)}")
+        key = (sku, date)
+        return key in self.promotion_schedule
     
     def reset(self) -> List[np.ndarray]:
         """
@@ -473,6 +530,15 @@ class ForecastEnvironment:
                     'original_bias': [],
                     'adjusted_bias': []
                 }
+        
+        # Reset band performance tracking
+        for band in self.band_performance:
+            self.band_performance[band] = {
+                'original_mape': [],
+                'adjusted_mape': [],
+                'original_bias': [],
+                'adjusted_bias': []
+            }
         
         for i in range(7):
             self.dow_performance[i] = {'original_mape': [], 'adjusted_mape': [], 'count': 0}
@@ -508,7 +574,8 @@ class ForecastEnvironment:
             'horizon_day': {},
             'target_date': {},
             'has_actual': {},
-            'pattern_type': {}  # Track pattern types for analysis
+            'pattern_type': {},
+            'sku_band': {}  # NEW: Track SKU band info
         }
         
         # Get current forecast date
@@ -549,10 +616,13 @@ class ForecastEnvironment:
                 if ml_col in sku_forecast:
                     original_forecast = sku_forecast[ml_col]
             
+            # Get SKU band and pattern type
+            sku_band = self._get_sku_band(sku)
+            pattern_type = self._get_pattern_type(sku)
+            
             # Add context information to info
             is_holiday = self._check_if_holiday(target_date)
             is_promotion = self._check_if_promotion(sku, target_date)
-            pattern_type = self._get_pattern_type(sku)
             
             info['is_holiday'][sku] = is_holiday
             info['is_promotion'][sku] = is_promotion
@@ -560,6 +630,7 @@ class ForecastEnvironment:
             info['horizon_day'][sku] = self.current_horizon_day
             info['target_date'][sku] = target_date
             info['pattern_type'][sku] = pattern_type
+            info['sku_band'][sku] = sku_band
             
             # Check if we have actual data for this target date and SKU
             has_actual = False
@@ -598,24 +669,42 @@ class ForecastEnvironment:
                 mape_improvement = original_mape - adjusted_mape
                 bias_improvement = abs(original_bias) - abs(adjusted_bias)
                 
+                # Apply SKU band-specific emphasis factors for rewards
+                band_factor = 1.0
+                if sku_band in ['A', 'B']:  # Fast-selling items
+                    # For high-volume SKUs, we care about both accuracy and bias
+                    band_factor = self.band_emphasis
+                    
+                    # Even more penalty for underbias in high-volume SKUs
+                    # (to avoid stockouts on popular items)
+                    if original_bias < 0 and adjusted_bias < 0 and abs(adjusted_bias) > abs(original_bias):
+                        band_factor *= 1.5  # Extra penalty for increasing underbias on fast-moving items
+                        
+                elif sku_band in ['D', 'E']:  # Slow-selling items
+                    # For low-volume SKUs, we care more about avoiding overbias
+                    band_factor = self.band_emphasis * 0.8
+                    
+                    # Stronger penalty for overbias on slow-moving items
+                    # (to prevent excess inventory)
+                    if original_bias > 0 and adjusted_bias > 0 and adjusted_bias > original_bias:
+                        band_factor *= 1.5  # Extra penalty for increasing overbias on slow-moving items
+                        
                 # Apply pattern-specific emphasis factors
-                emphasis_factor = 1.0
+                pattern_factor = 1.0
                 
-                # Give stronger rewards/penalties for specific patterns
                 if pattern_type == "promo_holiday" and (is_holiday or is_promotion):
-                    emphasis_factor = self.pattern_emphasis  # Emphasize promo/holiday patterns
-                elif pattern_type == "day_pattern" and target_date.weekday() >= 5:  # Weekend
-                    emphasis_factor = self.pattern_emphasis  # Emphasize day-of-week patterns
+                    pattern_factor = self.pattern_emphasis
+                elif pattern_type == "day_pattern" and target_date.weekday() >= 5:
+                    pattern_factor = self.pattern_emphasis
                 elif pattern_type == "underbias":
-                    emphasis_factor = self.pattern_emphasis * 0.8  # Less emphasis on underbias
+                    pattern_factor = self.pattern_emphasis * 0.8
                 
                 # Consider horizon day in reward calculation
-                # More weight for near-term horizon days, less for further out
                 horizon_factor = 1.0 - 0.5 * (self.current_horizon_day / self.forecast_horizon)
                 
                 # Calculate rewards based on improvements
-                mape_reward = mape_improvement * self.reward_scaling * emphasis_factor * horizon_factor
-                bias_reward = bias_improvement * self.reward_scaling * emphasis_factor * horizon_factor
+                mape_reward = mape_improvement * self.reward_scaling * pattern_factor * horizon_factor * band_factor
+                bias_reward = bias_improvement * self.reward_scaling * pattern_factor * horizon_factor * band_factor
                 
                 # Positive reinforcement: larger rewards for improvements, smaller penalties for degradation
                 if mape_improvement > 0:
@@ -635,6 +724,13 @@ class ForecastEnvironment:
                     self.pattern_performance[pattern_type]['adjusted_mape'].append(adjusted_mape)
                     self.pattern_performance[pattern_type]['original_bias'].append(original_bias)
                     self.pattern_performance[pattern_type]['adjusted_bias'].append(adjusted_bias)
+                
+                # Track performance by band
+                if sku_band in self.band_performance:
+                    self.band_performance[sku_band]['original_mape'].append(original_mape)
+                    self.band_performance[sku_band]['adjusted_mape'].append(adjusted_mape)
+                    self.band_performance[sku_band]['original_bias'].append(original_bias)
+                    self.band_performance[sku_band]['adjusted_bias'].append(adjusted_bias)
                 
                 # Track day-of-week performance
                 dow = target_date.weekday()
@@ -667,102 +763,160 @@ class ForecastEnvironment:
                     # Consider horizon day in heuristic calculation
                     horizon_factor = 1.0 - 0.5 * (self.current_horizon_day / self.forecast_horizon)
                     
-                    # Different adjustment strategies based on pattern type and context
+                    # Different adjustment strategies based on pattern type, context, and SKU band
                     est_mape_improvement = 0.0
                     est_bias_improvement = 0.0
                     
-                    # Pattern-specific proxy rewards
-                    if pattern_type == "promo_holiday":
+                    # NEW: Band-specific heuristics
+                    if sku_band in ['A', 'B']:  # High-volume, fast-selling items
                         if is_holiday or is_promotion:
-                            # For promo/holiday SKUs during events, reward upward adjustments
-                            if adjustment_factor > 1.1:  # Significant increase
+                            # For high-volume items during events, reward upward adjustments (avoid stockouts)
+                            if adjustment_factor > 1.1:
                                 est_mape_improvement = 0.05 * adjustment_factor
                                 est_bias_improvement = 0.08 * adjustment_factor
                             else:
-                                # Penalize for not increasing forecast during events
                                 est_mape_improvement = -0.03
                                 est_bias_improvement = -0.04
                         else:
-                            # For non-event days, smaller adjustments are better
-                            adj_magnitude = abs(adjustment_factor - 1.0)
-                            if adj_magnitude < 0.1:
-                                est_mape_improvement = 0.01
-                                est_bias_improvement = 0.01
+                            # For regular days, prefer moderate adjustments based on historical bias
+                            if bias < -0.1:  # Historical underbias
+                                # Reward upward adjustments
+                                if adjustment_factor > 1.1:
+                                    est_mape_improvement = 0.05 * adjustment_factor
+                                    est_bias_improvement = 0.06 * adjustment_factor
+                                else:
+                                    est_mape_improvement = -0.02
+                                    est_bias_improvement = -0.03
+                            elif bias > 0.1:  # Historical overbias
+                                # Reward downward adjustments
+                                if adjustment_factor < 0.9:
+                                    est_mape_improvement = 0.04 * (2 - adjustment_factor)
+                                    est_bias_improvement = 0.05 * (2 - adjustment_factor)
+                                else:
+                                    est_mape_improvement = -0.01
+                                    est_bias_improvement = -0.02
                             else:
-                                est_mape_improvement = -0.01 * adj_magnitude
-                                est_bias_improvement = -0.01 * adj_magnitude
-                    
-                    elif pattern_type == "day_pattern":
-                        # For day pattern SKUs, reward adjustments that match day-of-week patterns
-                        dow = target_date.weekday()
+                                # Small historical bias - prefer small adjustments
+                                est_mape_improvement = 0.02 * (1 - abs(adjustment_factor - 1.0))
+                                est_bias_improvement = 0.02 * (1 - abs(adjustment_factor - 1.0))
+                                
+                    elif sku_band in ['D', 'E']:  # Low-volume, slow-selling items
+                        # For slow-moving items, prioritize avoiding overbias
+                        if adjustment_factor > 1.0:
+                            # Penalize large upward adjustments (avoid overstock)
+                            est_mape_improvement = 0.02 - 0.04 * (adjustment_factor - 1.0)
+                            est_bias_improvement = 0.02 - 0.06 * (adjustment_factor - 1.0)
+                            
+                            # Exception for promotions
+                            if is_promotion:
+                                est_mape_improvement += 0.04
+                                est_bias_improvement += 0.04
+                        elif adjustment_factor < 1.0:
+                            # Reward small downward adjustments (reduce overstock risk)
+                            adj_magnitude = 1.0 - adjustment_factor
+                            if adj_magnitude < 0.2:  # Small adjustment
+                                est_mape_improvement = 0.03 * adj_magnitude  
+                                est_bias_improvement = 0.04 * adj_magnitude
+                            else:  # Large adjustment
+                                est_mape_improvement = 0.01  # Diminishing returns for very large adjustments
+                                est_bias_improvement = 0.01
+                    else:  # 'C' band - balanced approach
+                        # Pattern-specific proxy rewards
+                        if pattern_type == "promo_holiday":
+                            if is_holiday or is_promotion:
+                                # For promo/holiday SKUs during events, reward upward adjustments
+                                if adjustment_factor > 1.1:  # Significant increase
+                                    est_mape_improvement = 0.05 * adjustment_factor
+                                    est_bias_improvement = 0.08 * adjustment_factor
+                                else:
+                                    # Penalize for not increasing forecast during events
+                                    est_mape_improvement = -0.03
+                                    est_bias_improvement = -0.04
+                            else:
+                                # For non-event days, smaller adjustments are better
+                                adj_magnitude = abs(adjustment_factor - 1.0)
+                                if adj_magnitude < 0.1:
+                                    est_mape_improvement = 0.01
+                                    est_bias_improvement = 0.01
+                                else:
+                                    est_mape_improvement = -0.01 * adj_magnitude
+                                    est_bias_improvement = -0.01 * adj_magnitude
                         
-                        if dow >= 5:  # Weekend
-                            # For weekends, reward upward adjustments
-                            if adjustment_factor > 1.1:
-                                est_mape_improvement = 0.05 * adjustment_factor
-                                est_bias_improvement = 0.06 * adjustment_factor
+                        elif pattern_type == "day_pattern":
+                            # For day pattern SKUs, reward adjustments that match day-of-week patterns
+                            dow = target_date.weekday()
+                            
+                            if dow >= 5:  # Weekend
+                                # For weekends, reward upward adjustments
+                                if adjustment_factor > 1.1:
+                                    est_mape_improvement = 0.05 * adjustment_factor
+                                    est_bias_improvement = 0.06 * adjustment_factor
+                                else:
+                                    est_mape_improvement = -0.02
+                                    est_bias_improvement = -0.03
+                            elif dow == 0:  # Monday
+                                # For Mondays, reward downward adjustments
+                                if adjustment_factor < 0.9:
+                                    est_mape_improvement = 0.04 * (2 - adjustment_factor)
+                                    est_bias_improvement = 0.05 * (2 - adjustment_factor)
+                                else:
+                                    est_mape_improvement = -0.01
+                                    est_bias_improvement = -0.02
+                            else:
+                                # For other days, moderate adjustments are better
+                                adj_magnitude = abs(adjustment_factor - 1.0)
+                                if adj_magnitude < 0.2:
+                                    est_mape_improvement = 0.01
+                                    est_bias_improvement = 0.01
+                                else:
+                                    est_mape_improvement = -0.01 * adj_magnitude
+                                    est_bias_improvement = -0.01 * adj_magnitude
+                        
+                        elif pattern_type == "underbias":
+                            # For underbias SKUs, reward upward adjustments
+                            if adjustment_factor > 1.0:
+                                est_mape_improvement = 0.03 * adjustment_factor
+                                est_bias_improvement = 0.04 * adjustment_factor
                             else:
                                 est_mape_improvement = -0.02
                                 est_bias_improvement = -0.03
-                        elif dow == 0:  # Monday
-                            # For Mondays, reward downward adjustments
-                            if adjustment_factor < 0.9:
-                                est_mape_improvement = 0.04 * (2 - adjustment_factor)
-                                est_bias_improvement = 0.05 * (2 - adjustment_factor)
-                            else:
-                                est_mape_improvement = -0.01
-                                est_bias_improvement = -0.02
-                        else:
-                            # For other days, moderate adjustments are better
-                            adj_magnitude = abs(adjustment_factor - 1.0)
-                            if adj_magnitude < 0.2:
-                                est_mape_improvement = 0.01
-                                est_bias_improvement = 0.01
-                            else:
-                                est_mape_improvement = -0.01 * adj_magnitude
-                                est_bias_improvement = -0.01 * adj_magnitude
-                    
-                    elif pattern_type == "underbias":
-                        # For underbias SKUs, reward upward adjustments
-                        if adjustment_factor > 1.0:
-                            est_mape_improvement = 0.03 * adjustment_factor
-                            est_bias_improvement = 0.04 * adjustment_factor
-                        else:
-                            est_mape_improvement = -0.02
-                            est_bias_improvement = -0.03
-                    
-                    else:
-                        # Generic strategy for unknown patterns
-                        # For bias correction, reward adjustments in the right direction
-                        if bias > 0 and adjustment_factor < 1.0:
-                            # Reducing forecast when historically overforecasting
-                            est_bias_improvement = bias * (1.0 - adjustment_factor) * 0.5
-                        elif bias < 0 and adjustment_factor > 1.0:
-                            # Increasing forecast when historically underforecasting
-                            est_bias_improvement = abs(bias) * (adjustment_factor - 1.0) * 0.5
-                        else:
-                            # Going in wrong direction
-                            est_bias_improvement = -abs(bias) * abs(adjustment_factor - 1.0) * 0.3
                         
-                        est_mape_improvement = est_bias_improvement * 0.5  # MAPE improvement correlates with bias
+                        else:
+                            # Generic strategy for unknown patterns
+                            # For bias correction, reward adjustments in the right direction
+                            if bias > 0 and adjustment_factor < 1.0:
+                                # Reducing forecast when historically overforecasting
+                                est_bias_improvement = bias * (1.0 - adjustment_factor) * 0.5
+                            elif bias < 0 and adjustment_factor > 1.0:
+                                # Increasing forecast when historically underforecasting
+                                est_bias_improvement = abs(bias) * (adjustment_factor - 1.0) * 0.5
+                            else:
+                                # Going in wrong direction
+                                est_bias_improvement = -abs(bias) * abs(adjustment_factor - 1.0) * 0.3
+                            
+                            est_mape_improvement = est_bias_improvement * 0.5  # MAPE improvement correlates with bias
                     
-                    # Create a heuristic reward with horizon weighting
-                    horizon_weight = 1.0 - 0.5 * (self.current_horizon_day / self.forecast_horizon)
-                    emphasis_factor = 1.0
-                    
+                    # Combine all factors for a heuristic reward
+                    band_factor = 1.0
+                    if sku_band in ['A', 'B']:
+                        band_factor = self.band_emphasis
+                    elif sku_band in ['D', 'E']:
+                        band_factor = self.band_emphasis * 0.8
+                        
+                    pattern_factor = 1.0
                     if pattern_type == "promo_holiday" and (is_holiday or is_promotion):
-                        emphasis_factor = self.pattern_emphasis
+                        pattern_factor = self.pattern_emphasis
                     elif pattern_type == "day_pattern" and target_date.weekday() >= 5:
-                        emphasis_factor = self.pattern_emphasis
+                        pattern_factor = self.pattern_emphasis
                     elif pattern_type == "underbias":
-                        emphasis_factor = self.pattern_emphasis * 0.8
+                        pattern_factor = self.pattern_emphasis * 0.8
                     
                     if self.optimize_for == "mape":
-                        reward = est_mape_improvement * self.reward_scaling * emphasis_factor * horizon_weight
+                        reward = est_mape_improvement * self.reward_scaling * pattern_factor * horizon_factor * band_factor
                     elif self.optimize_for == "bias":
-                        reward = est_bias_improvement * self.reward_scaling * emphasis_factor * horizon_weight
+                        reward = est_bias_improvement * self.reward_scaling * pattern_factor * horizon_factor * band_factor
                     else:  # "both"
-                        reward = (est_mape_improvement + est_bias_improvement) * (self.reward_scaling / 2) * emphasis_factor * horizon_weight
+                        reward = (est_mape_improvement + est_bias_improvement) * (self.reward_scaling / 2) * pattern_factor * horizon_factor * band_factor
                     
                     # Populate info with estimates
                     info['original_mape'][sku] = float(est_original_mape)
@@ -795,7 +949,8 @@ class ForecastEnvironment:
                 'is_promotion': info['is_promotion'][sku],
                 'day_of_week': target_date.weekday(),
                 'day_of_month': target_date.day,
-                'pattern_type': pattern_type
+                'pattern_type': pattern_type,
+                'sku_band': sku_band  # NEW: Record SKU band
             })
         
         # Update baseline metrics (first time we have actuals)
@@ -861,6 +1016,39 @@ class ForecastEnvironment:
                         'bias_improvement': bias_improvement,
                         'sample_count': len(metrics['original_mape'])
                     }
+        
+        return performance
+    
+    def get_band_performance(self) -> Dict:
+        """Get performance metrics for each SKU band."""
+        performance = {}
+        
+        for band, metrics in self.band_performance.items():
+            if len(metrics['original_mape']) > 0:
+                avg_original_mape = np.mean(metrics['original_mape'])
+                avg_adjusted_mape = np.mean(metrics['adjusted_mape'])
+                avg_original_bias = np.mean([abs(b) for b in metrics['original_bias']])
+                avg_adjusted_bias = np.mean([abs(b) for b in metrics['adjusted_bias']])
+                
+                mape_improvement = (avg_original_mape - avg_adjusted_mape) / avg_original_mape if avg_original_mape > 0 else 0
+                bias_improvement = (avg_original_bias - avg_adjusted_bias) / avg_original_bias if avg_original_bias > 0 else 0
+                
+                # For band D and E, we're more concerned about overbias
+                # Calculate additional metrics specifically for overbias
+                overbias_indices = [i for i, b in enumerate(metrics['original_bias']) if b > 0]
+                if overbias_indices:
+                    orig_overbias = np.mean([metrics['original_bias'][i] for i in overbias_indices])
+                    adj_overbias = np.mean([metrics['adjusted_bias'][i] for i in overbias_indices])
+                    overbias_reduction = (orig_overbias - adj_overbias) / orig_overbias if orig_overbias > 0 else 0
+                else:
+                    overbias_reduction = 0
+                
+                performance[band] = {
+                    'mape_improvement': mape_improvement,
+                    'bias_improvement': bias_improvement,
+                    'overbias_reduction': overbias_reduction,
+                    'sample_count': len(metrics['original_mape'])
+                }
         
         return performance
     

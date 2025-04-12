@@ -1,87 +1,122 @@
 """
-Pattern Learning Example - Demonstrates the RL agent learning specific forecast patterns
-and evaluates the improvement for different pattern types.
+Example script demonstrating the forecast adjustment system with SKU banding.
+This example shows how to use the system to adjust forecasts with differentiated
+strategies for high-volume (bands A-B) vs. low-volume (bands D-E) SKUs.
 """
 
 import os
-import numpy as np
 import pandas as pd
+import numpy as np
 import logging
-import time
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
-# Import components
+# Import the components
 from forecast_adjustment.agent import ForecastAgent
 from forecast_adjustment.environment import ForecastEnvironment
 from forecast_adjustment.trainer import ForecastTrainer
 from forecast_adjustment.utils.data_generator import generate_historical_forecast_dataset
-from forecast_adjustment.utils.visualization import (
-    visualize_sku_improvements,
-    calculate_context_specific_improvements,
-    plot_metrics_summary
-)
 
 
-def setup_logging(log_file=None):
-    """Set up logging configuration."""
-    handlers = [logging.StreamHandler()]
-    if log_file:
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
+def setup_logging(output_dir):
+    """Set up logging for the example."""
+    log_file = os.path.join(output_dir, "forecast_adjustment.log")
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
     
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=handlers
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
     )
     
-    return logging.getLogger("PatternLearning")
+    return logging.getLogger("ForecastAdjustment")
 
 
-def generate_pattern_dataset(output_dir, logger):
-    """Generate a dataset with clear patterns for the RL agent to learn."""
-    logger.info("Generating pattern dataset with clear learning opportunities")
+def generate_sample_data(output_dir, logger):
+    """Generate sample data with SKU banding information."""
+    logger.info("Generating sample data with SKU banding")
     
-    # Generate synthetic data with strong patterns
+    # Generate synthetic forecast data using the built-in generator
     forecast_data, actual_data, holiday_data, promo_data = generate_historical_forecast_dataset(
-        num_skus=30,  # More SKUs for better pattern learning
+        num_skus=50,
         forecast_horizon=14,
-        historical_days=180,  # More historical data for better learning
+        historical_days=90,
         output_dir=os.path.join(output_dir, "data"),
         logger=logger
     )
     
-    # Load SKU pattern information
-    sku_pattern_path = os.path.join(output_dir, "data", "sku_patterns.csv")
-    if os.path.exists(sku_pattern_path):
-        sku_patterns = pd.read_csv(sku_pattern_path)
-        logger.info(f"Loaded {len(sku_patterns)} SKU patterns")
+    # Create SKU banding information (A-E) based on sales volume
+    # Extract unique SKUs
+    unique_skus = forecast_data['sku_id'].unique()
+    
+    # Calculate total volume for each SKU to determine banding
+    sku_volumes = {}
+    for sku in unique_skus:
+        sku_data = actual_data[actual_data['sku_id'] == sku]
+        sku_volumes[sku] = sku_data['actual_value'].sum() if not sku_data.empty else 0
+    
+    # Sort SKUs by volume
+    sorted_skus = sorted(sku_volumes.items(), key=lambda x: x[1], reverse=True)
+    
+    # Assign bands (A: top 10%, B: next 20%, C: middle 40%, D: next 20%, E: bottom 10%)
+    num_skus = len(sorted_skus)
+    band_thresholds = {
+        'A': int(num_skus * 0.1),
+        'B': int(num_skus * 0.3),
+        'C': int(num_skus * 0.7),
+        'D': int(num_skus * 0.9),
+        'E': num_skus
+    }
+    
+    # Create SKU band mapping
+    sku_bands = []
+    for i, (sku, volume) in enumerate(sorted_skus):
+        if i < band_thresholds['A']:
+            band = 'A'
+        elif i < band_thresholds['B']:
+            band = 'B'
+        elif i < band_thresholds['C']:
+            band = 'C'
+        elif i < band_thresholds['D']:
+            band = 'D'
+        else:
+            band = 'E'
         
-        # Count by pattern
-        pattern_counts = sku_patterns['pattern_type'].value_counts()
-        for pattern, count in pattern_counts.items():
-            logger.info(f"Pattern '{pattern}': {count} SKUs")
-    else:
-        logger.warning("SKU pattern information not found")
+        sku_bands.append({'sku_id': sku, 'band': band, 'volume': volume})
     
-    return forecast_data, actual_data, holiday_data, promo_data
+    # Create and save SKU band DataFrame
+    sku_band_df = pd.DataFrame(sku_bands)
+    sku_band_path = os.path.join(output_dir, "data", "sku_bands.csv")
+    sku_band_df.to_csv(sku_band_path, index=False)
+    
+    # Log band distribution
+    band_counts = sku_band_df['band'].value_counts().sort_index()
+    for band, count in band_counts.items():
+        logger.info(f"Band {band}: {count} SKUs")
+    
+    # Return all data
+    return forecast_data, actual_data, holiday_data, promo_data, sku_band_df
 
 
-def train_pattern_agent(forecast_data, actual_data, holiday_data, promo_data, output_dir, logger):
-    """Train an agent to learn forecast adjustment patterns."""
-    logger.info("Creating forecast environment with pattern data")
+def train_forecast_model(forecast_data, actual_data, sku_band_data, holiday_data, promo_data, output_dir, logger):
+    """Train the forecast adjustment model with SKU banding."""
+    logger.info("Setting up environment and agent with SKU banding")
     
-    # Create environment with improved reward structure
+    # Create environment with SKU banding
     env = ForecastEnvironment(
         forecast_data=forecast_data,
         actual_data=actual_data,
+        sku_band_data=sku_band_data,  # Add SKU banding information
         holiday_data=holiday_data,
         promotion_data=promo_data,
         forecast_horizon=14,
         optimize_for="both",
-        reward_scaling=10.0,  # Higher reward scaling for stronger learning signal
-        pattern_emphasis=2.0,  # Emphasis on pattern-specific rewards
+        reward_scaling=5.0,
+        pattern_emphasis=1.5,
+        band_emphasis=1.8,  # Emphasis for band-specific rewards
         logger=logger
     )
     
@@ -89,54 +124,50 @@ def train_pattern_agent(forecast_data, actual_data, holiday_data, promo_data, ou
     feature_dims = env.get_feature_dims()
     total_feature_dim = feature_dims[-1]
     
-    logger.info(f"Feature dimensions: {feature_dims}")
-    
-    # Create agent with improved learning capabilities
-    logger.info("Creating forecast agent with context-specific learning")
+    # Create agent with band-specific learning
     agent = ForecastAgent(
         feature_dim=total_feature_dim,
-        action_size=11,
-        learning_rate=0.005,  # Lower learning rate for more stable learning
-        gamma=0.95,  # Slightly reduced discount factor to focus more on immediate rewards
+        action_size=11,  # Default 11 adjustment factors from 0.5x to 2.0x
+        learning_rate=0.005,
+        gamma=0.95,
         epsilon_start=1.0,
-        epsilon_end=0.05,  # Increased minimum exploration
-        epsilon_decay=0.998,  # Slower decay for more exploration
-        context_learning=True,  # Enable context-specific learning
+        epsilon_end=0.05,
+        epsilon_decay=0.998,
+        context_learning=True,  # Enable context-specific learning (including bands)
         logger=logger
     )
     
     # Define curriculum learning phases
     training_phases = [
         {
-            'episodes': 100,  # First 20% - exploration phase
+            'episodes': 100,  # Initial exploration
             'epsilon': 0.9,
             'learning_rate': 0.008,
-            'batch_size': 64,
+            'batch_size': 32,
             'description': 'Initial exploration phase'
         },
         {
-            'episodes': 250,  # Next 50% - pattern learning phase
+            'episodes': 200,  # Pattern and band learning
             'epsilon': 0.5,
             'learning_rate': 0.005,
-            'batch_size': 128,
-            'description': 'Pattern learning phase'
+            'batch_size': 64,
+            'description': 'Pattern and band learning phase'
         },
         {
-            'episodes': 350,  # Final 30% - refinement phase
+            'episodes': 200,  # Refinement
             'epsilon': 0.1,
             'learning_rate': 0.001,
-            'batch_size': 256,
+            'batch_size': 128,
             'description': 'Fine-tuning phase'
         }
     ]
     
     # Create trainer with curriculum learning
-    logger.info("Creating forecast trainer with curriculum learning")
     trainer = ForecastTrainer(
         agent=agent,
         environment=env,
         output_dir=output_dir,
-        num_episodes=700,  # More episodes for better learning
+        num_episodes=500,
         max_steps=14,
         batch_size=64,
         save_every=50,
@@ -145,266 +176,237 @@ def train_pattern_agent(forecast_data, actual_data, holiday_data, promo_data, ou
         logger=logger
     )
     
-    # Train the agent on historical data
-    logger.info("Training forecast agent on pattern data")
-    start_time = time.time()
+    # Train the agent
+    logger.info("Starting training...")
     train_metrics = trainer.train(verbose=True)
-    training_time = time.time() - start_time
     
-    logger.info(f"Training completed in {training_time:.2f} seconds")
+    logger.info("Training complete")
+    logger.info(f"Best MAPE improvement: {train_metrics['best_mape_improvement']:.4f}")
+    logger.info(f"Best bias improvement: {train_metrics['best_bias_improvement']:.4f}")
     
-    # Display training metrics
-    logger.info("Training metrics:")
-    logger.info(f"  Final Score: {train_metrics['scores'][-1]:.2f}")
-    logger.info(f"  Final MAPE Improvement: {train_metrics['mape_improvements'][-1]:.4f}")
-    logger.info(f"  Final Bias Improvement: {train_metrics['bias_improvements'][-1]:.4f}")
-    
-    # Context-specific metrics
-    logger.info("Context-specific final improvements:")
-    logger.info(f"  Holiday MAPE Improvement: {train_metrics['holiday_metrics']['mape_improvements'][-1]:.4f}")
-    logger.info(f"  Promotion MAPE Improvement: {train_metrics['promo_metrics']['mape_improvements'][-1]:.4f}")
-    logger.info(f"  Weekend MAPE Improvement: {train_metrics['weekend_metrics']['mape_improvements'][-1]:.4f}")
-    logger.info(f"  Weekday MAPE Improvement: {train_metrics['weekday_metrics']['mape_improvements'][-1]:.4f}")
-    
-    # Pattern-specific metrics
-    if 'pattern_metrics' in train_metrics:
-        logger.info("Pattern-specific final improvements:")
-        for pattern, metrics in train_metrics['pattern_metrics'].items():
-            if metrics['mape_improvements']:
-                logger.info(f"  {pattern} MAPE Improvement: {metrics['mape_improvements'][-1]:.4f}")
-    
-    return env, agent, trainer, train_metrics
+    return trainer, train_metrics
 
 
-def evaluate_pattern_learning(env, agent, trainer, output_dir, logger):
-    """Evaluate how well the agent learned different forecast patterns."""
-    logger.info("Evaluating agent's pattern learning capabilities")
+def evaluate_model(trainer, output_dir, logger):
+    """Evaluate the trained model with band-specific analysis."""
+    logger.info("Evaluating model performance with band focus")
     
-    # Run a thorough evaluation
-    eval_metrics = trainer.evaluate(num_episodes=20, verbose=True)
+    # Run evaluation
+    eval_metrics = trainer.evaluate(num_episodes=10, verbose=True)
     
-    logger.info("Evaluation metrics:")
-    logger.info(f"  Average Score: {eval_metrics['avg_score']:.2f}")
-    logger.info(f"  Average MAPE Improvement: {eval_metrics['avg_mape_improvement']:.4f}")
-    logger.info(f"  Average Bias Improvement: {eval_metrics['avg_bias_improvement']:.4f}")
+    # Log overall performance
+    logger.info(f"Overall MAPE improvement: {eval_metrics['avg_mape_improvement']:.4f}")
+    logger.info(f"Overall bias improvement: {eval_metrics['avg_bias_improvement']:.4f}")
     
-    # Context-specific evaluation metrics
-    logger.info("Context-specific evaluation results:")
-    logger.info(f"  Holiday MAPE Improvement: {eval_metrics['context_metrics']['holiday']['avg_mape_improvement']:.4f}")
-    logger.info(f"  Promotion MAPE Improvement: {eval_metrics['context_metrics']['promotion']['avg_mape_improvement']:.4f}")
-    logger.info(f"  Weekend MAPE Improvement: {eval_metrics['context_metrics']['weekend']['avg_mape_improvement']:.4f}")
-    logger.info(f"  Weekday MAPE Improvement: {eval_metrics['context_metrics']['weekday']['avg_mape_improvement']:.4f}")
+    # Log band-specific performance
+    if 'band_metrics' in eval_metrics:
+        logger.info("Band-specific performance:")
+        for band, metrics in eval_metrics['band_metrics'].items():
+            logger.info(f"  Band {band}: MAPE improvement = {metrics['avg_mape_improvement']:.4f}, "
+                      f"bias improvement = {metrics['avg_bias_improvement']:.4f}")
     
-    # Pattern-specific evaluation metrics
-    if 'pattern_metrics' in eval_metrics:
-        logger.info("Pattern-specific evaluation results:")
-        for pattern, metrics in eval_metrics['pattern_metrics'].items():
-            logger.info(f"  {pattern} MAPE Improvement: {metrics['avg_mape_improvement']:.4f}")
+    # Generate adjusted forecasts for analysis
+    logger.info("Generating adjusted forecasts...")
+    adjustments = trainer.generate_adjusted_forecasts(num_days=14)
     
-    # Extract top performing SKUs by pattern
-    logger.info("Top performing SKUs by pattern:")
-    sku_metrics = eval_metrics['sku_metrics']
+    # Analyze adjustment patterns by band
+    analyze_band_adjustments(adjustments, output_dir, logger)
     
-    # Load SKU pattern information
-    sku_pattern_path = os.path.join(output_dir, "data", "sku_patterns.csv")
-    if os.path.exists(sku_pattern_path):
-        sku_patterns = pd.read_csv(sku_pattern_path)
-        sku_pattern_dict = dict(zip(sku_patterns['sku_id'], sku_patterns['pattern_type']))
-        
-        # Group by pattern and get top performers
-        pattern_metrics = {}
-        for sku, metrics in sku_metrics.items():
-            if sku in sku_pattern_dict:
-                pattern = sku_pattern_dict[sku]
-                if pattern not in pattern_metrics:
-                    pattern_metrics[pattern] = []
-                
-                pattern_metrics[pattern].append((sku, metrics['overall']['mape_improvement']))
-        
-        # Print top performers by pattern
-        for pattern, sku_list in pattern_metrics.items():
-            sorted_skus = sorted(sku_list, key=lambda x: x[1], reverse=True)
-            logger.info(f"  Pattern '{pattern}' top SKUs:")
-            for sku, improvement in sorted_skus[:3]:
-                logger.info(f"    {sku}: MAPE Improvement = {improvement:.4f}")
-    
-    # Generate adjusted forecasts
-    logger.info("Generating adjusted forecasts")
-    adjusted_forecasts = trainer.generate_adjusted_forecasts(num_days=30)
-    
-    return eval_metrics, adjusted_forecasts
+    return eval_metrics, adjustments
 
 
-def visualize_pattern_learning(env, adjusted_forecasts, output_dir, logger):
-    """Create visualizations showing pattern learning results."""
-    logger.info("Creating pattern learning visualizations")
-    
-    # Load SKU pattern information
-    sku_patterns = {}
-    sku_pattern_path = os.path.join(output_dir, "data", "sku_patterns.csv")
-    if os.path.exists(sku_pattern_path):
-        sku_pattern_df = pd.read_csv(sku_pattern_path)
-        sku_patterns = dict(zip(sku_pattern_df['sku_id'], sku_pattern_df['pattern_type']))
-    
-    # Extract original forecasts from environment history
-    adjustment_history = env.get_adjustment_history()
-    original_forecasts_df = pd.DataFrame(adjustment_history)
-    
-    # Check and fix column names in adjustment history
-    logger.info(f"Adjustment history columns: {original_forecasts_df.columns.tolist()}")
-    
-    # Rename columns if needed to match expected names
-    column_mapping = {}
-    if 'sku' in original_forecasts_df.columns and 'sku_id' not in original_forecasts_df.columns:
-        column_mapping['sku'] = 'sku_id'
-    if 'target_date' in original_forecasts_df.columns and 'date' not in original_forecasts_df.columns:
-        column_mapping['target_date'] = 'date'
-    
-    if column_mapping:
-        original_forecasts_df = original_forecasts_df.rename(columns=column_mapping)
-        logger.info(f"Renamed columns: {column_mapping}")
-    
-    # Format adjusted forecasts for visualization
-    if 'date' in adjusted_forecasts.columns:
-        date_col = 'date'
-    else:
-        date_col = 'target_date'
-        if date_col in adjusted_forecasts.columns:
-            adjusted_forecasts = adjusted_forecasts.rename(columns={date_col: 'date'})
-    
-    # Add pattern_type to adjusted forecasts if not present
-    if 'pattern_type' not in adjusted_forecasts.columns and sku_patterns:
-        adjusted_forecasts['pattern_type'] = adjusted_forecasts['sku_id'].map(sku_patterns)
-    
-    # Select needed columns from adjusted forecasts
-    needed_cols = ['sku_id', 'date', 'original_forecast', 'adjusted_forecast', 'pattern_type']
-    context_cols = ['is_holiday', 'is_promotion', 'is_weekend']
-    available_cols = [col for col in needed_cols + context_cols if col in adjusted_forecasts.columns]
-    
-    adjusted_forecasts_df = adjusted_forecasts[available_cols].copy()
-    
-    # Add missing context columns if not present
-    for col in context_cols:
-        if col not in adjusted_forecasts_df.columns:
-            adjusted_forecasts_df[col] = False
-            logger.warning(f"Added missing column: {col}")
-    
-    # Load actual data
-    actual_data_path = os.path.join(output_dir, "data", "historical_actuals.csv")
-    actuals_df = pd.read_csv(actual_data_path)
-    
-    # Add pattern_type to actuals if not present
-    if 'pattern_type' not in actuals_df.columns and sku_patterns:
-        actuals_df['pattern_type'] = actuals_df['sku_id'].map(sku_patterns)
-    
-    # Load holiday and promotion data
-    holiday_data_path = os.path.join(output_dir, "data", "holidays.csv")
-    holiday_df = pd.read_csv(holiday_data_path) if os.path.exists(holiday_data_path) else None
-    
-    promo_data_path = os.path.join(output_dir, "data", "promotions.csv")
-    promo_df = pd.read_csv(promo_data_path) if os.path.exists(promo_data_path) else None
+def analyze_band_adjustments(adjustments, output_dir, logger):
+    """Analyze adjustment patterns by SKU bands."""
+    logger.info("Analyzing adjustment patterns by SKU bands")
     
     # Create visualization directory
-    vis_dir = os.path.join(output_dir, "visualizations")
-    os.makedirs(vis_dir, exist_ok=True)
+    viz_dir = os.path.join(output_dir, "visualizations")
+    os.makedirs(viz_dir, exist_ok=True)
     
-    # Log data sizes to help debug
-    logger.info(f"Original forecasts shape: {original_forecasts_df.shape}")
-    logger.info(f"Adjusted forecasts shape: {adjusted_forecasts_df.shape}")
-    logger.info(f"Actuals shape: {actuals_df.shape}")
-    
-    # Create SKU improvement visualizations
-    try:
-        visualize_sku_improvements(
-            original_forecasts=original_forecasts_df,
-            adjusted_forecasts=adjusted_forecasts_df,
-            actuals=actuals_df,
-            sku_patterns=sku_patterns,
-            holiday_data=holiday_df,
-            promotion_data=promo_df,
-            output_dir=vis_dir,
-            logger=logger
-        )
-    except Exception as e:
-        logger.error(f"Error in SKU improvement visualization: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-    
-    # Calculate and visualize context-specific metrics
-    try:
-        metrics = calculate_context_specific_improvements(
-            original_forecasts=original_forecasts_df,
-            adjusted_forecasts=adjusted_forecasts_df,
-            actuals=actuals_df,
-            logger=logger
-        )
+    # Summarize adjustment factors by band
+    if 'sku_band' in adjustments.columns:
+        # Calculate average adjustment factors
+        band_factors = adjustments.groupby('sku_band')['adjustment_factor'].agg(['mean', 'std', 'count']).reset_index()
         
-        # Plot metrics summary
-        plot_metrics_summary(metrics, output_dir=vis_dir, logger=logger)
+        # Log summary
+        logger.info("Adjustment factors by band:")
+        for _, row in band_factors.iterrows():
+            logger.info(f"  Band {row['sku_band']}: mean = {row['mean']:.3f}, std = {row['std']:.3f}, count = {row['count']}")
         
-        logger.info(f"Pattern learning visualizations saved to {vis_dir}")
-    except Exception as e:
-        logger.error(f"Error in calculating metrics: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        metrics = {"overall": {"improvement": 0}}
-    
-    return metrics
+        # Create band comparison plot
+        plt.figure(figsize=(10, 6))
+        
+        # Calculate percentage of upward and downward adjustments by band
+        band_direction = {}
+        for band in adjustments['sku_band'].unique():
+            band_df = adjustments[adjustments['sku_band'] == band]
+            upward = len(band_df[band_df['adjustment_factor'] > 1.0]) / len(band_df) * 100
+            no_change = len(band_df[band_df['adjustment_factor'] == 1.0]) / len(band_df) * 100
+            downward = len(band_df[band_df['adjustment_factor'] < 1.0]) / len(band_df) * 100
+            band_direction[band] = (upward, no_change, downward)
+        
+        # Plot adjustment direction by band
+        bands = sorted(band_direction.keys())
+        upward = [band_direction[b][0] for b in bands]
+        no_change = [band_direction[b][1] for b in bands]
+        downward = [band_direction[b][2] for b in bands]
+        
+        x = np.arange(len(bands))
+        width = 0.25
+        
+        plt.bar(x - width, upward, width, label='Upward (>1.0)', color='green')
+        plt.bar(x, no_change, width, label='No Change (=1.0)', color='gray')
+        plt.bar(x + width, downward, width, label='Downward (<1.0)', color='red')
+        
+        plt.title('Adjustment Direction by SKU Band')
+        plt.xlabel('SKU Band')
+        plt.ylabel('Percentage of Adjustments')
+        plt.xticks(x, bands)
+        plt.legend()
+        plt.grid(axis='y', alpha=0.3)
+        
+        # Add percentage labels
+        for i, v in enumerate(upward):
+            plt.text(i - width, v/2, f"{v:.1f}%", ha='center', va='center', color='white', fontweight='bold')
+        for i, v in enumerate(no_change):
+            if v > 5:  # Only label if there's enough space
+                plt.text(i, v/2, f"{v:.1f}%", ha='center', va='center', color='white', fontweight='bold')
+        for i, v in enumerate(downward):
+            plt.text(i + width, v/2, f"{v:.1f}%", ha='center', va='center', color='white', fontweight='bold')
+        
+        plt.savefig(os.path.join(viz_dir, 'band_adjustment_direction.png'))
+        plt.close()
+        
+        # Create adjustment factor distribution plot
+        plt.figure(figsize=(12, 8))
+        
+        # Focus on the extreme bands for clarity
+        bands_to_plot = ['A', 'E'] if 'A' in bands and 'E' in bands else bands[:2]
+        colors = ['blue', 'red']
+        
+        for i, band in enumerate(bands_to_plot):
+            band_df = adjustments[adjustments['sku_band'] == band]
+            plt.hist(band_df['adjustment_factor'], bins=20, alpha=0.7, 
+                     range=(0.4, 2.1), label=f'Band {band}', color=colors[i])
+        
+        plt.title('Adjustment Factor Distribution by Band')
+        plt.xlabel('Adjustment Factor')
+        plt.ylabel('Count')
+        plt.legend()
+        plt.grid(alpha=0.3)
+        
+        plt.savefig(os.path.join(viz_dir, 'band_adjustment_distribution.png'))
+        plt.close()
+        
+        # Context-specific analysis by band (holidays, promotions, weekends)
+        if 'is_holiday' in adjustments.columns and 'is_promotion' in adjustments.columns:
+            plt.figure(figsize=(14, 8))
+            
+            # Calculate average adjustment for different contexts per band
+            contexts = []
+            band_values = []
+            
+            for band in bands_to_plot:
+                band_df = adjustments[adjustments['sku_band'] == band]
+                
+                # Regular days
+                regular_df = band_df[~band_df['is_holiday'] & ~band_df['is_promotion'] & ~band_df['is_weekend']]
+                avg_regular = regular_df['adjustment_factor'].mean() if len(regular_df) > 0 else 1.0
+                
+                # Holiday days
+                holiday_df = band_df[band_df['is_holiday']]
+                avg_holiday = holiday_df['adjustment_factor'].mean() if len(holiday_df) > 0 else 1.0
+                
+                # Promotion days
+                promo_df = band_df[band_df['is_promotion']]
+                avg_promo = promo_df['adjustment_factor'].mean() if len(promo_df) > 0 else 1.0
+                
+                # Weekend days (excluding holidays and promos)
+                weekend_df = band_df[band_df['is_weekend'] & ~band_df['is_holiday'] & ~band_df['is_promotion']]
+                avg_weekend = weekend_df['adjustment_factor'].mean() if len(weekend_df) > 0 else 1.0
+                
+                # Combine into series
+                band_values.append([avg_regular, avg_weekend, avg_holiday, avg_promo])
+                contexts.append(band)
+            
+            # Plot side by side
+            x = np.arange(4)  # Four contexts
+            width = 0.35
+            
+            plt.bar(x - width/2, band_values[0], width, label=f'Band {bands_to_plot[0]}', color='blue')
+            plt.bar(x + width/2, band_values[1], width, label=f'Band {bands_to_plot[1]}', color='red')
+            
+            plt.title('Average Adjustment Factor by Context and Band')
+            plt.ylabel('Adjustment Factor')
+            plt.xticks(x, ['Regular', 'Weekend', 'Holiday', 'Promotion'])
+            plt.legend()
+            plt.grid(axis='y', alpha=0.3)
+            
+            # Add value labels
+            for i, vals in enumerate(band_values):
+                offset = -width/2 if i == 0 else width/2
+                for j, v in enumerate(vals):
+                    plt.text(j + offset, v + 0.02, f"{v:.2f}", ha='center', va='bottom')
+            
+            plt.savefig(os.path.join(viz_dir, 'band_context_comparison.png'))
+            plt.close()
 
 
 def main():
-    """Main function to demonstrate pattern learning in forecast adjustment."""
+    """Main function to demonstrate the forecast adjustment system with SKU banding."""
     # Set up output directory and logging
-    output_dir = "output/pattern_learning"
-    os.makedirs(output_dir, exist_ok=True)
-    logger = setup_logging(os.path.join(output_dir, "pattern_learning.log"))
+    output_dir = "output/sku_band_example"
+    logger = setup_logging(output_dir)
     
-    logger.info("Starting pattern learning demonstration")
+    logger.info("Starting forecast adjustment example with SKU banding")
     
-    # Step 1: Generate dataset with clear patterns
-    forecast_data, actual_data, holiday_data, promo_data = generate_pattern_dataset(
+    # Step 1: Generate sample data with SKU banding
+    forecast_data, actual_data, holiday_data, promo_data, sku_band_data = generate_sample_data(
         output_dir=output_dir,
         logger=logger
     )
     
-    # Step 2: Train agent to learn patterns
-    env, agent, trainer, train_metrics = train_pattern_agent(
+    # Step 2: Train model with SKU bands
+    trainer, train_metrics = train_forecast_model(
         forecast_data=forecast_data,
         actual_data=actual_data,
+        sku_band_data=sku_band_data,
         holiday_data=holiday_data,
         promo_data=promo_data,
         output_dir=output_dir,
         logger=logger
     )
     
-    # Step 3: Evaluate pattern learning
-    eval_metrics, adjusted_forecasts = evaluate_pattern_learning(
-        env=env,
-        agent=agent,
+    # Step 3: Evaluate and analyze results
+    eval_metrics, adjustments = evaluate_model(
         trainer=trainer,
         output_dir=output_dir,
         logger=logger
     )
     
-    # Step 4: Visualize pattern learning results
-    metrics = visualize_pattern_learning(
-        env=env,
-        adjusted_forecasts=adjusted_forecasts,
-        output_dir=output_dir,
-        logger=logger
-    )
+    logger.info("Example completed successfully")
+    logger.info(f"Results saved to {output_dir}")
+    logger.info("Key findings:")
     
-    # Display overall performance improvement
-    overall_improvement = metrics['overall'].get('improvement', 0)
-    logger.info(f"Overall MAPE improvement: {overall_improvement:.2f}%")
+    # Summarize key band-related findings
+    if 'band_metrics' in eval_metrics:
+        best_band = max(eval_metrics['band_metrics'].items(), 
+                       key=lambda x: x[1]['avg_mape_improvement'])[0]
+        worst_band = min(eval_metrics['band_metrics'].items(), 
+                        key=lambda x: x[1]['avg_mape_improvement'])[0]
+        
+        logger.info(f"  Best performing band: {best_band} with "
+                  f"{eval_metrics['band_metrics'][best_band]['avg_mape_improvement']:.4f} MAPE improvement")
+        logger.info(f"  Worst performing band: {worst_band} with "
+                  f"{eval_metrics['band_metrics'][worst_band]['avg_mape_improvement']:.4f} MAPE improvement")
     
-    # Display pattern-specific improvements
-    logger.info("Pattern-specific MAPE improvements:")
-    for pattern, pattern_metrics in metrics.get('by_pattern', {}).items():
-        improvement = pattern_metrics.get('improvement', 0)
-        logger.info(f"  {pattern}: {improvement:.2f}%")
-    
-    logger.info("Pattern learning demonstration completed successfully")
+    # Final summary of band-specific adjustments
+    if 'sku_band' in adjustments.columns:
+        for band in sorted(adjustments['sku_band'].unique()):
+            band_df = adjustments[adjustments['sku_band'] == band]
+            upward = len(band_df[band_df['adjustment_factor'] > 1.0]) / len(band_df) * 100
+            downward = len(band_df[band_df['adjustment_factor'] < 1.0]) / len(band_df) * 100
+            logger.info(f"  Band {band}: {upward:.1f}% upward, {downward:.1f}% downward adjustments")
 
 
 if __name__ == "__main__":

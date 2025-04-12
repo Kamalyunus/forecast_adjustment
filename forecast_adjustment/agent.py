@@ -1,10 +1,10 @@
 """
 Enhanced Linear Agent Module - Q-learning agent with linear function approximation for
-forecast adjustment with support for calendar effects, holidays, and promotions.
+forecast adjustment with support for SKU banding (A-E).
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Any
 import pickle
 import os
 import logging
@@ -13,23 +13,24 @@ import logging
 class ForecastAgent:
     """
     Q-Learning agent with linear function approximation for forecast adjustment.
-    This enhanced version supports handling calendar effects, holidays, and promotions.
+    This enhanced version supports handling SKU banding (A-E) with different
+    adjustment strategies for each band.
     """
     
     def __init__(self, 
                 feature_dim: int,
                 action_size: int = 11,
-                learning_rate: float = 0.005,  # Reduced from 0.01
-                gamma: float = 0.95,  # Reduced from 0.99 to focus more on immediate rewards
+                learning_rate: float = 0.005,
+                gamma: float = 0.95,
                 epsilon_start: float = 1.0,
-                epsilon_end: float = 0.05,  # Increased from 0.01 to ensure more exploration
-                epsilon_decay: float = 0.998,  # Slower decay from 0.995
+                epsilon_end: float = 0.05,
+                epsilon_decay: float = 0.998,
                 adjustment_factors: Optional[List[float]] = None,
-                buffer_size: int = 20000,  # Increased from 10000
-                context_learning: bool = True,  # New parameter to enable context-specific learning
+                buffer_size: int = 20000,
+                context_learning: bool = True,
                 logger: Optional[logging.Logger] = None):
         """
-        Initialize Enhanced Linear Function Approximation Agent.
+        Initialize Enhanced Linear Function Approximation Agent with SKU banding support.
         
         Args:
             feature_dim: Dimension of state features
@@ -83,6 +84,15 @@ class ForecastAgent:
             self.promo_weights = np.zeros((self.action_size, feature_dim))
             self.weekend_weights = np.zeros((self.action_size, feature_dim))
             self.weekday_weights = np.zeros((self.action_size, feature_dim))
+            
+            # NEW: Band-specific weights (A-E)
+            self.band_weights = {
+                'A': np.zeros((self.action_size, feature_dim)),
+                'B': np.zeros((self.action_size, feature_dim)),
+                'C': np.zeros((self.action_size, feature_dim)),
+                'D': np.zeros((self.action_size, feature_dim)),
+                'E': np.zeros((self.action_size, feature_dim)),
+            }
         
         # Simple buffer for experience replay
         self.buffer = []
@@ -102,7 +112,16 @@ class ForecastAgent:
         self.weekend_action_counts = np.zeros(self.action_size)
         self.weekday_action_counts = np.zeros(self.action_size)
         
-        # Success tracking (new)
+        # NEW: Band-specific action counts
+        self.band_action_counts = {
+            'A': np.zeros(self.action_size),
+            'B': np.zeros(self.action_size),
+            'C': np.zeros(self.action_size),
+            'D': np.zeros(self.action_size),
+            'E': np.zeros(self.action_size),
+        }
+        
+        # Success tracking
         self.positive_rewards = 0
         self.total_actions = 0
         
@@ -158,6 +177,7 @@ class ForecastAgent:
         
         # Use context-specific weights if available
         if self.context_learning and context is not None:
+            # First, we'll handle all standard contexts
             if context.get('is_holiday', False):
                 q_values = np.dot(self.holiday_weights, norm_features)
             elif context.get('is_promotion', False):
@@ -166,6 +186,14 @@ class ForecastAgent:
                 q_values = np.dot(self.weekend_weights, norm_features)
             else:
                 q_values = np.dot(self.weekday_weights, norm_features)
+            
+            # NEW: If SKU band is available, we blend with band-specific weights
+            if 'sku_band' in context:
+                band = context['sku_band']
+                if band in self.band_weights:
+                    band_q = np.dot(self.band_weights[band], norm_features)
+                    # Blend with more weight to band-specific values
+                    q_values = 0.3 * q_values + 0.7 * band_q
                 
             # Blend with general weights to avoid overfitting
             general_q = np.dot(self.weights, norm_features)
@@ -187,18 +215,46 @@ class ForecastAgent:
         Args:
             state: Current state features
             explore: Whether to use epsilon-greedy exploration
-            context: Optional dictionary with context flags (is_holiday, is_promotion, is_weekend)
+            context: Optional dictionary with context flags (is_holiday, is_promotion, is_weekend, sku_band)
             
         Returns:
             Selected action index
         """
+        # Get Q-values
         q_values = self.get_q_values(state, context)
         
-        # Enhanced exploration strategy with pattern-specific guidance
+        # Enhanced exploration strategy with pattern-specific and band-specific guidance
         if explore:
             if np.random.random() < self.epsilon:
-                # Biased exploration for specific contexts
-                if context is not None:
+                # NEW: Bias exploration based on SKU band
+                if context is not None and 'sku_band' in context:
+                    band = context['sku_band']
+                    
+                    # Different exploration strategies based on SKU band
+                    if band in ['A', 'B']:  # High-volume SKUs (can tolerate some overbias)
+                        # Allow more upward adjustments for fast-selling items
+                        mid_point = len(self.adjustment_factors) // 2
+                        p = np.ones(self.action_size)
+                        # Increase probability for adjustments >= 1.0
+                        p[mid_point:] *= 2.0
+                        p = p / p.sum()
+                        action = np.random.choice(self.action_size, p=p)
+                        
+                    elif band in ['D', 'E']:  # Low-volume SKUs (avoid overbias to prevent overstock)
+                        # For slow-moving items, bias toward conservative/downward adjustments
+                        mid_point = len(self.adjustment_factors) // 2
+                        p = np.ones(self.action_size)
+                        # Increase probability for adjustments < 1.0
+                        p[:mid_point] *= 2.0
+                        p = p / p.sum()
+                        action = np.random.choice(self.action_size, p=p)
+                        
+                    else:  # 'C' band or unknown
+                        # Balanced exploration
+                        action = np.random.randint(self.action_size)
+                        
+                # If no band info, use context-specific biases
+                elif context is not None:
                     if context.get('is_holiday', False) or context.get('is_promotion', False):
                         # For holidays/promos, try higher factors more often (boost forecast)
                         bias_point = self.action_size * 0.7  # 70% through the adjustment factors
@@ -237,6 +293,12 @@ class ForecastAgent:
                 self.weekend_action_counts[action] += 1
             else:
                 self.weekday_action_counts[action] += 1
+                
+            # NEW: Track band-specific action statistics
+            if 'sku_band' in context:
+                band = context['sku_band']
+                if band in self.band_action_counts:
+                    self.band_action_counts[band][action] += 1
         
         return action
     
@@ -286,7 +348,17 @@ class ForecastAgent:
         
         # Determine which weight matrix to use based on context
         if self.context_learning and context is not None:
-            if context.get('is_holiday', False):
+            # First check for band-specific weights (highest priority)
+            if 'sku_band' in context:
+                band = context['sku_band']
+                if band in self.band_weights:
+                    weights = self.band_weights[band]
+                    # Also update general weights for this band with a smaller learning rate
+                    self._update_weights(self.weights, action, norm_state, reward, next_state, done, context, 0.3)
+                else:
+                    weights = self.weights
+            # Then check for other context-specific weights
+            elif context.get('is_holiday', False):
                 weights = self.holiday_weights
             elif context.get('is_promotion', False):
                 weights = self.promo_weights
@@ -297,10 +369,41 @@ class ForecastAgent:
         else:
             weights = self.weights
         
+        # Perform the update on the selected weight matrix
+        td_error = self._update_weights(weights, action, norm_state, reward, next_state, done, context)
+        
+        # If using context-specific weights but not band weights, update general weights with a smaller learning rate
+        if self.context_learning and weights is not self.weights and 'sku_band' not in context:
+            self._update_weights(self.weights, action, norm_state, reward, next_state, done, context, 0.3)
+        
+        # Decay epsilon
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+        
+        return abs(td_error)
+    
+    def _update_weights(self, weights: np.ndarray, action: int, norm_state: np.ndarray, 
+                      reward: float, next_state: np.ndarray, done: bool, 
+                      context: Optional[Dict] = None, learning_rate_factor: float = 1.0) -> float:
+        """
+        Helper method to update a specific weight matrix.
+        
+        Args:
+            weights: Weight matrix to update
+            action: Action taken
+            norm_state: Normalized state features
+            reward: Reward received
+            next_state: Next state
+            done: Whether the episode is done
+            context: Context flags
+            learning_rate_factor: Factor to adjust learning rate (for secondary updates)
+            
+        Returns:
+            TD error
+        """
         # Current Q-value
         current_q = np.dot(weights[action], norm_state)
         
-        # Next state's best Q-value (using appropriate context weights)
+        # Next state's best Q-value
         if done:
             next_q = 0
         else:
@@ -316,25 +419,18 @@ class ForecastAgent:
         td_error = target - current_q
         
         # Clip TD error to prevent extreme updates
-        td_error_clipped = np.clip(td_error, -50.0, 50.0)  # Reduced from -100/100
+        td_error_clipped = np.clip(td_error, -50.0, 50.0)
         
         # Check for NaN/Inf before weight update
         if np.isnan(td_error_clipped) or np.isinf(td_error_clipped):
             self.logger.warning("NaN or Inf TD error detected, skipping update")
             return 0.0
         
-        # Update weights with a learning rate that decreases for larger errors
-        effective_lr = self.learning_rate / (1.0 + 0.1 * abs(td_error_clipped))
+        # Apply learning rate factor and update weights
+        effective_lr = (self.learning_rate * learning_rate_factor) / (1.0 + 0.1 * abs(td_error_clipped))
         weights[action] += effective_lr * td_error_clipped * norm_state
         
-        # Also update general weights (if using context-specific)
-        if self.context_learning and weights is not self.weights:
-            self.weights[action] += 0.3 * effective_lr * td_error_clipped * norm_state
-        
-        # Decay epsilon
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
-        
-        return abs(td_error)
+        return td_error
     
     def batch_update(self, batch_size: int = 32) -> float:
         """
@@ -349,34 +445,58 @@ class ForecastAgent:
         if len(self.buffer) < batch_size:
             return 0.0
         
-        # Sample batch of experiences with priority for context samples
-        # This ensures we learn more from holiday, promotion, and weekend samples
+        # Sample batch of experiences with priority for band and context samples
+        band_indices = []
         context_indices = []
         regular_indices = []
         
         for i, (_, _, _, _, _, context) in enumerate(self.buffer):
-            if context is not None and (context.get('is_holiday', False) or 
+            if context is not None and 'sku_band' in context:
+                band_indices.append(i)
+            elif context is not None and (context.get('is_holiday', False) or 
                                        context.get('is_promotion', False) or
                                        context.get('is_weekend', False)):
                 context_indices.append(i)
             else:
                 regular_indices.append(i)
         
-        # Ensure at least some context samples if available
-        context_count = min(batch_size // 2, len(context_indices))
-        regular_count = batch_size - context_count
+        # Ensure we sample from band-specific experiences if available
+        band_count = min(batch_size // 3, len(band_indices))
+        context_count = min(batch_size // 3, len(context_indices))
+        regular_count = batch_size - band_count - context_count
         
         # Sample from each group
-        if context_count > 0:
-            context_batch = np.random.choice(context_indices, context_count, replace=False)
-        else:
-            context_batch = []
-            
-        regular_batch = np.random.choice(regular_indices, regular_count, replace=False)
+        sampled_indices = []
         
-        # Combine indices
-        indices = np.concatenate([context_batch, regular_batch])
-        batch = [self.buffer[int(i)] for i in indices]
+        if band_count > 0 and len(band_indices) > 0:
+            sampled_indices.extend(np.random.choice(band_indices, band_count, replace=False))
+    
+        # Sample from context indices if available    
+        if context_count > 0 and len(context_indices) > 0:
+            sampled_indices.extend(np.random.choice(context_indices, context_count, replace=False))
+        
+        # Sample from regular indices if available
+        if regular_count > 0 and len(regular_indices) > 0:
+            sampled_indices.extend(np.random.choice(regular_indices, regular_count, replace=False))
+        
+        # If we don't have enough samples, fill from any available indices
+        remaining_count = batch_size - len(sampled_indices)
+        if remaining_count > 0:
+            # Use all available indices for sampling the remaining
+            all_indices = list(range(len(self.buffer)))
+            # Remove already sampled indices
+            available_indices = [i for i in all_indices if i not in sampled_indices]
+            
+            if available_indices:
+                additional_samples = np.random.choice(
+                    available_indices, 
+                    min(remaining_count, len(available_indices)), 
+                    replace=False
+                )
+                sampled_indices.extend(additional_samples)
+
+        # Get batch
+        batch = [self.buffer[int(i)] for i in sampled_indices]
         
         total_error = 0.0
         valid_samples = 0
@@ -401,12 +521,12 @@ class ForecastAgent:
     def calculate_adjusted_forecast(self, action_idx: int, forecast: float, 
                                    context: Optional[Dict] = None) -> float:
         """
-        Apply adjustment to forecast based on the selected action and context.
+        Apply adjustment to forecast based on the selected action, context, and SKU band.
         
         Args:
             action_idx: Action index
             forecast: Original forecast value
-            context: Optional context information
+            context: Optional context information including SKU band
             
         Returns:
             Adjusted forecast
@@ -421,7 +541,27 @@ class ForecastAgent:
         # Apply factor to forecast
         factor = self.adjustment_factors[action_idx]
         
-        # Apply context-specific adjustments
+        # NEW: Apply band-specific adjustment constraints
+        if context is not None and 'sku_band' in context:
+            band = context['sku_band']
+            
+            # Constraints based on SKU band
+            if band in ['A', 'B']:  # Fast-selling items
+                # Allow more aggressive upward adjustments (can tolerate overbias)
+                if factor > 1.0:
+                    factor = factor * 1.1  # Boost upward adjustments
+                
+            elif band in ['D', 'E']:  # Slow-moving items
+                # Constrain upward adjustments to prevent overstock
+                if factor > 1.0:
+                    # Dampen upward adjustments for slow-moving items
+                    factor = 1.0 + (factor - 1.0) * 0.7  # Less aggressive upward adjustments
+                    
+                    # If it's also a promotion or holiday, allow more upward adjustment
+                    if context.get('is_promotion', False) or context.get('is_holiday', False):
+                        factor = factor * 1.1  # But still boost a bit for special events
+        
+        # Apply standard context-specific adjustments
         if context is not None:
             # Apply stronger adjustments for holidays and promotions
             if context.get('is_holiday', False) and factor > 1.0:
@@ -440,7 +580,7 @@ class ForecastAgent:
     
     def get_action_statistics(self) -> Dict:
         """
-        Get statistics on action selection in different contexts.
+        Get statistics on action selection in different contexts and bands.
         
         Returns:
             Dictionary of action statistics
@@ -458,6 +598,15 @@ class ForecastAgent:
         promo_dist = self.promo_action_counts / total_promo if total_promo > 0 else np.zeros_like(self.promo_action_counts)
         weekend_dist = self.weekend_action_counts / total_weekend if total_weekend > 0 else np.zeros_like(self.weekend_action_counts)
         weekday_dist = self.weekday_action_counts / total_weekday if total_weekday > 0 else np.zeros_like(self.weekday_action_counts)
+        
+        # Calculate band-specific distributions
+        band_distributions = {}
+        for band, counts in self.band_action_counts.items():
+            total_band = np.sum(counts)
+            band_distributions[band] = {
+                'counts': counts.tolist(),
+                'distribution': (counts / total_band).tolist() if total_band > 0 else np.zeros_like(counts).tolist()
+            }
         
         # Calculate success rate
         success_rate = self.positive_rewards / max(1, self.total_actions)
@@ -484,7 +633,8 @@ class ForecastAgent:
             'weekday': {
                 'counts': self.weekday_action_counts.tolist(),
                 'distribution': weekday_dist.tolist()
-            }
+            },
+            'bands': band_distributions
         }
     
     def save(self, filepath: str) -> None:
@@ -506,6 +656,7 @@ class ForecastAgent:
             'promo_action_counts': self.promo_action_counts,
             'weekend_action_counts': self.weekend_action_counts,
             'weekday_action_counts': self.weekday_action_counts,
+            'band_action_counts': self.band_action_counts,
             'adjustment_factors': self.adjustment_factors,
             'params': {
                 'learning_rate': self.learning_rate,
@@ -525,6 +676,7 @@ class ForecastAgent:
             data['promo_weights'] = self.promo_weights
             data['weekend_weights'] = self.weekend_weights
             data['weekday_weights'] = self.weekday_weights
+            data['band_weights'] = self.band_weights
         
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -582,6 +734,8 @@ class ForecastAgent:
             agent.weekend_action_counts = data['weekend_action_counts']
         if 'weekday_action_counts' in data:
             agent.weekday_action_counts = data['weekday_action_counts']
+        if 'band_action_counts' in data:
+            agent.band_action_counts = data['band_action_counts']
         
         # Load context-specific weights if available and context learning is enabled
         if context_learning:
@@ -593,6 +747,8 @@ class ForecastAgent:
                 agent.weekend_weights = data['weekend_weights']
             if 'weekday_weights' in data:
                 agent.weekday_weights = data['weekday_weights']
+            if 'band_weights' in data:
+                agent.band_weights = data['band_weights']
         
         # Load success metrics if available
         if 'positive_rewards' in data:
