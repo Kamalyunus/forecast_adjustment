@@ -55,7 +55,7 @@ def generate_forecast_dataset(
     
     # Create SKUs with different patterns
     # 40% with underbias pattern
-    underbias_count = int(num_skus * 0.4)
+    underbias_count = int(num_skus * 0.3)
     for i in range(underbias_count):
         sku_id = f"SKU_UNDER_{i:03d}"
         skus.append(sku_id)

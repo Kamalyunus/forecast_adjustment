@@ -44,9 +44,9 @@ def main():
     # Step 1: Generate sample data
     logger.info("Generating sample forecast data")
     datasets = generate_forecast_dataset(
-        num_skus=20,
+        num_skus=250,
         forecast_horizon=14,
-        historical_days=90,
+        historical_days=180,
         output_dir=os.path.join(output_dir, "data"),
         include_bands=True,
         logger=logger
@@ -73,9 +73,8 @@ def main():
         action_size=11,  # 11 adjustment factors from 0.5x to 2.0x
         learning_rate=0.005,
         gamma=0.95,
-        epsilon_start=0.9,
-        epsilon_end=0.05,
-        epsilon_decay=0.998,
+        ucb_constant=2.0,  # UCB exploration parameter
+        conservative_factor=0.7,  # How conservative to be with "First, Do No Harm"
         context_learning=True,
         logger=logger
     )
@@ -83,22 +82,22 @@ def main():
     # Step 4: Define training phases for curriculum learning
     training_phases = [
         {
-            'episodes': 50,  # Initial exploration
-            'epsilon': 0.9,
+            'episodes': 200,  # Initial exploration
+            'ucb_constant': 3.0,  # More exploration initially
             'learning_rate': 0.008,
             'batch_size': 32,
             'description': 'Initial exploration phase'
         },
         {
-            'episodes': 100,  # Pattern and band learning
-            'epsilon': 0.5,
+            'episodes': 300,  # Pattern learning (extended)
+            'ucb_constant': 2.0,
             'learning_rate': 0.005,
             'batch_size': 64,
             'description': 'Pattern and band learning phase'
         },
         {
-            'episodes': 150,  # Refinement
-            'epsilon': 0.1,
+            'episodes': 500,  # Fine-tuning (much longer)
+            'ucb_constant': 1.0,  # Less exploration in final phase
             'learning_rate': 0.001,
             'batch_size': 128,
             'description': 'Fine-tuning phase'
@@ -111,7 +110,7 @@ def main():
         agent=agent,
         environment=env,
         output_dir=output_dir,
-        num_episodes=300,  # For a quick example
+        num_episodes=1000,  # For a quick example
         max_steps=14,
         save_every=25,
         training_phases=training_phases,
