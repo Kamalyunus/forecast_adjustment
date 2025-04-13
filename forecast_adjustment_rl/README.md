@@ -130,7 +130,3 @@ To use with real data:
 1. Modify the data loading in `data_loader.py`
 2. Adjust the reward function in `reward.py` to match business priorities
 3. Tune hyperparameters in `config.py`
-
-## License
-
-[MIT License](LICENSE)

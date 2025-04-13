@@ -8,6 +8,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import os
 import logging
+from utils import get_week_of_month
 
 logger = logging.getLogger(__name__)
 
@@ -745,6 +746,7 @@ class DataProvider:
         # In a real system, would compare today's ML forecast with yesterday's
         return np.random.uniform(-0.02, 0.02)
     
+    
     def get_historical_bias(self, category, band, date, before_adjustment=True):
         """
         Get historical bias for evaluating adjustments.
@@ -766,12 +768,18 @@ class DataProvider:
         else:
             category_num = hash(str(category)) % 10
             
+        # Import utility function instead of using missing method
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from utils import get_week_of_month
+        
         # Week of month effect
-        week_of_month = self._get_week_of_month(date)
+        week_of_month = get_week_of_month(date)
         
         # Determine bias type based on category
         bias_types = ['unbiased', 'wom_underbias', 'constant_under', 
-                     'constant_over', 'seasonal_bias']
+                    'constant_over', 'seasonal_bias']
         bias_type = bias_types[category_num % len(bias_types)]
         
         # Base bias value

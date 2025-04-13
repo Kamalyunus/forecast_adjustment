@@ -40,14 +40,39 @@ class ForecastAdjustmentAgent:
         self.lr = self.agent_config['learning_rate']
         self.gamma = self.agent_config['gamma']
         self.batch_size = self.agent_config['batch_size']
-        self.device = torch.device(self.system_config['device'])
+        
+        import torch
+        # Configure GPU usage
+        self.device = torch.device(self.system_config['device'] if torch.cuda.is_available() else "cpu")
+        if self.device.type == 'cuda':
+            logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+            # Set pytorch to use current GPU
+            torch.cuda.set_device(0)
+            # Enable CUDA optimization
+            torch.backends.cudnn.benchmark = True
+        else:
+            logger.warning("GPU not available, using CPU instead")
+        
+        # Set mixed precision if enabled and using GPU
+        self.mixed_precision = self.system_config.get('mixed_precision', False) and self.device.type == 'cuda'
+        if self.mixed_precision:
+            try:
+                # Check if using PyTorch version with native AMP support
+                import torch.cuda.amp
+                self.scaler = torch.cuda.amp.GradScaler()
+                logger.info("Using mixed precision training with automatic mixed precision")
+            except ImportError:
+                self.mixed_precision = False
+                logger.warning("Mixed precision requested but not supported in current PyTorch version")
         
         # Set random seed for reproducibility
         torch.manual_seed(self.system_config['random_seed'])
+        if self.device.type == 'cuda':
+            torch.cuda.manual_seed(self.system_config['random_seed'])
         random.seed(self.system_config['random_seed'])
         np.random.seed(self.system_config['random_seed'])
         
-        # Initialize neural networks
+        # Initialize neural networks with proper GPU support
         self.policy_net = PolicyNetwork(
             state_dim, 
             action_dim, 
@@ -91,7 +116,7 @@ class ForecastAdjustmentAgent:
         Returns:
             Tuple of (action_idx, action_probs)
         """
-        # Convert state to tensor
+        # Convert state to tensor and move to device
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         
         # Get action probabilities from policy network
@@ -139,39 +164,73 @@ class ForecastAdjustmentAgent:
         batch = random.sample(self.memory, self.batch_size)
         states, action_idxs, rewards, next_states, dones = zip(*batch)
         
-        # Convert to tensors
+        # Convert to tensors and move to device
         states = torch.FloatTensor(np.array(states)).to(self.device)
         action_idxs = torch.LongTensor(action_idxs).to(self.device)
         rewards = torch.FloatTensor(rewards).to(self.device)
         next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
         dones = torch.FloatTensor(dones).to(self.device)
         
-        # Calculate advantage estimates
-        current_values = self.value_net(states).squeeze()
-        next_values = self.value_net(next_states).squeeze()
-        
-        # TD error as advantage estimate
-        targets = rewards + self.gamma * next_values * (1 - dones)
-        advantages = targets - current_values
-        
-        # Get action probabilities and log probabilities
-        action_probs = self.policy_net(states)
-        action_probs_for_actions = action_probs.gather(1, action_idxs.unsqueeze(1)).squeeze()
-        log_probs = torch.log(action_probs_for_actions + 1e-10)  # Add small epsilon for numerical stability
-        
-        # Calculate losses
-        policy_loss = -(log_probs * advantages.detach()).mean()
-        value_loss = nn.MSELoss()(current_values, targets.detach())
-        
-        # Update policy network
-        self.policy_optimizer.zero_grad()
-        policy_loss.backward()
-        self.policy_optimizer.step()
-        
-        # Update value network
-        self.value_optimizer.zero_grad()
-        value_loss.backward()
-        self.value_optimizer.step()
+        # Use mixed precision if enabled
+        if self.mixed_precision:
+            with torch.cuda.amp.autocast():
+                # Calculate advantage estimates
+                current_values = self.value_net(states).squeeze()
+                next_values = self.value_net(next_states).squeeze()
+                
+                # TD error as advantage estimate
+                targets = rewards + self.gamma * next_values * (1 - dones)
+                advantages = targets - current_values
+                
+                # Get action probabilities and log probabilities
+                action_probs = self.policy_net(states)
+                action_probs_for_actions = action_probs.gather(1, action_idxs.unsqueeze(1)).squeeze()
+                log_probs = torch.log(action_probs_for_actions + 1e-10)  # Add small epsilon for numerical stability
+                
+                # Calculate losses
+                policy_loss = -(log_probs * advantages.detach()).mean()
+                value_loss = nn.MSELoss()(current_values, targets.detach())
+            
+            # Update policy network with gradient scaling
+            self.policy_optimizer.zero_grad()
+            self.scaler.scale(policy_loss).backward()
+            self.scaler.step(self.policy_optimizer)
+            
+            # Update value network with gradient scaling
+            self.value_optimizer.zero_grad()
+            self.scaler.scale(value_loss).backward()
+            self.scaler.step(self.value_optimizer)
+            
+            # Update scaler
+            self.scaler.update()
+        else:
+            # Regular training without mixed precision
+            # Calculate advantage estimates
+            current_values = self.value_net(states).squeeze()
+            next_values = self.value_net(next_states).squeeze()
+            
+            # TD error as advantage estimate
+            targets = rewards + self.gamma * next_values * (1 - dones)
+            advantages = targets - current_values
+            
+            # Get action probabilities and log probabilities
+            action_probs = self.policy_net(states)
+            action_probs_for_actions = action_probs.gather(1, action_idxs.unsqueeze(1)).squeeze()
+            log_probs = torch.log(action_probs_for_actions + 1e-10)  # Add small epsilon for numerical stability
+            
+            # Calculate losses
+            policy_loss = -(log_probs * advantages.detach()).mean()
+            value_loss = nn.MSELoss()(current_values, targets.detach())
+            
+            # Update policy network
+            self.policy_optimizer.zero_grad()
+            policy_loss.backward()
+            self.policy_optimizer.step()
+            
+            # Update value network
+            self.value_optimizer.zero_grad()
+            value_loss.backward()
+            self.value_optimizer.step()
         
         # Track losses
         policy_loss_val = policy_loss.item()

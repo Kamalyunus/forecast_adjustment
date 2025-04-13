@@ -10,6 +10,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from utils import get_week_of_month, plot_adjustment_factors, plot_category_metrics
 
+
 # Import configuration and components
 import config
 from data.data_loader import DataProvider
@@ -115,6 +116,93 @@ def run_inference():
     except Exception as e:
         logger.error(f"Error during inference: {str(e)}")
         print("Inference failed - see log for details")
+
+def compare_rl_vs_baseline():
+    """Compare forecast performance with and without RL adjustments."""
+    logger.info("Comparing RL adjustments vs baseline ML forecasts...")
+    
+    # Import the utility function
+    from utils import get_week_of_month
+    
+    # Initialize components
+    data_provider = DataProvider(config.__dict__)
+    adjuster = ForecastAdjuster(config.__dict__)
+    
+    # Select categories and bands to evaluate
+    categories = sorted(data_provider.ml_forecasts['category'].unique())[:3]
+    bands = ['A', 'B']
+    
+    # Import visualization utilities
+    try:
+        from visualization_utils import plot_comparison_with_without_rl
+    except ImportError:
+        logger.warning("visualization_utils module not found, skipping visualization")
+        plot_comparison_with_without_rl = None
+    
+    # Simulate 4 weeks of forecasting - one complete month
+    start_date = datetime.now()
+    dates = []
+    for week in range(4):
+        # Use middle of each week
+        week_date = start_date + timedelta(days=(week*7 + 3))
+        dates.append(week_date)
+    
+    # Initialize metrics storage
+    with_rl_metrics = {'mape': [], 'bias': []}
+    without_rl_metrics = {'mape': [], 'bias': []}
+    
+    # For each week, compare performance with and without adjustments
+    for week, date in enumerate(dates):
+        week_of_month = get_week_of_month(date)  # Use utility function
+        
+        # For each category-band, get metrics
+        week_with_mape = []
+        week_with_bias = []
+        week_without_mape = []
+        week_without_bias = []
+        
+        for category in categories:
+            for band in bands:
+                # Get original ML forecast metrics
+                ml_mape = data_provider.get_historical_mape(category, band, date, before_adjustment=True)
+                ml_bias = data_provider.get_historical_bias(category, band, date, before_adjustment=True)
+                
+                # Get metrics with RL adjustment
+                rl_mape = data_provider.get_historical_mape(category, band, date, before_adjustment=False)
+                rl_bias = data_provider.get_historical_bias(category, band, date, before_adjustment=False)
+                
+                # Store metrics
+                week_with_mape.append(rl_mape)
+                week_with_bias.append(rl_bias)
+                week_without_mape.append(ml_mape)
+                week_without_bias.append(ml_bias)
+        
+        # Average metrics across all category-bands for this week
+        with_rl_metrics['mape'].append(np.mean(week_with_mape))
+        with_rl_metrics['bias'].append(np.mean(week_with_bias))
+        without_rl_metrics['mape'].append(np.mean(week_without_mape))
+        without_rl_metrics['bias'].append(np.mean(week_without_bias))
+    
+    # Calculate overall improvement
+    mape_improvement = np.mean(without_rl_metrics['mape']) - np.mean(with_rl_metrics['mape'])
+    mape_pct_improvement = mape_improvement / np.mean(without_rl_metrics['mape']) * 100
+    
+    bias_improvement = np.mean([abs(b) for b in without_rl_metrics['bias']]) - np.mean([abs(b) for b in with_rl_metrics['bias']])
+    bias_pct_improvement = bias_improvement / np.mean([abs(b) for b in without_rl_metrics['bias']]) * 100
+    
+    # Plot comparison if visualization module is available
+    if plot_comparison_with_without_rl:
+        os.makedirs('plots', exist_ok=True)
+        plot_comparison_with_without_rl(with_rl_metrics, without_rl_metrics, save_dir='plots')
+    
+    # Print results
+    print("\nRL vs Baseline Comparison:")
+    print(f"MAPE: {mape_pct_improvement:.2f}% improvement with RL")
+    print(f"Bias: {bias_pct_improvement:.2f}% improvement with RL")
+    
+    logger.info(f"Comparison complete. Plots saved to plots/rl_comparison.png")
+    
+    return with_rl_metrics, without_rl_metrics
 
 def simulate_wom_effect():
     """Simulate and visualize the Week of Month effect handling."""
@@ -242,7 +330,7 @@ if __name__ == "__main__":
         
         # Simulate WoM effect handling
         simulate_wom_effect()
-        
+        compare_rl_vs_baseline()
         print("\n===== Demo Complete =====")
     except Exception as e:
         logger.error(f"Error running demo: {str(e)}")

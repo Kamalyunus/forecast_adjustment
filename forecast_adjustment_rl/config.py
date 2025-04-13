@@ -56,8 +56,12 @@ DATA_CONFIG = {
 SYSTEM_CONFIG = {
     'random_seed': 42,               # Random seed for reproducibility
     'log_level': 'INFO',             # Logging level
-    'device': 'cpu'                  # 'cpu' or 'cuda' for GPU
+    'device': 'cuda',                # Change from 'cpu' to 'cuda' to use GPU
+    'mixed_precision': True,         # Enable mixed precision training for faster GPU computation
+    'num_workers': 4,                # Number of worker threads for data loading
+    'pin_memory': True               # Faster data transfer to GPU
 }
+
 
 # Feature Engineering Configuration
 FEATURE_CONFIG = {

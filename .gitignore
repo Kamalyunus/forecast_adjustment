@@ -5,3 +5,4 @@ forecast_adjustment_rl/models/__pycache__/
 saved_models/
 plots/
 data/adjustments.csv
+models/__pycache__/
