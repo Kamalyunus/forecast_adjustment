@@ -1,5 +1,7 @@
-forecast_adjustment/__pycache__/
-forecast_adjustment/core/__pycache__/
-forecast_adjustment/data/__pycache__/
-forecast_adjustment/utils/__pycache__/
-output/
+forecast_adjustment_rl/environment/__pycache__/
+forecast_adjustment_rl/__pycache__/
+forecast_adjustment_rl/data/__pycache__/
+forecast_adjustment_rl/models/__pycache__/
+saved_models/
+plots/
+data/adjustments.csv
