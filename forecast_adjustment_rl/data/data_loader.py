@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import os
+import random
 import logging
 from utils import get_week_of_month
 
@@ -86,56 +87,106 @@ class DataProvider:
             raise
     
     def _create_synthetic_forecasts(self):
-        """Create synthetic forecast data for POC."""
-        # Define a date range for the synthetic data
-        start_date = datetime.now() - timedelta(days=90)
-        end_date = datetime.now() + timedelta(days=35)
+        """Create enhanced synthetic forecast data with complex patterns."""
+        # Define a date range for the synthetic data - expanded to 180 days
+        start_date = datetime.now() - timedelta(days=180)
+        end_date = datetime.now() + timedelta(days=45)  # Extended future forecasts
         dates = pd.date_range(start=start_date, end=end_date)
         
-        # Define categories and bands
-        categories = [f"Category_{i}" for i in range(1, 11)]
+        # Define more categories and bands
+        categories = [f"Category_{i}" for i in range(1, 31)]  # Increased from 10 to 30
         bands = ['A', 'B', 'C']
         
-        # Create SKUs for each category and band
+        # Create SKUs for each category and band with more complex patterns
         skus = []
+        
+        # Define more complex bias patterns
+        bias_types = [
+            'unbiased',         # generally accurate
+            'wom_underbias',    # strong WoM1 underbias 
+            'constant_under',   # consistently underforecasted
+            'constant_over',    # consistently overforecasted
+            'seasonal_bias',    # bias changes by season
+            'trend_bias',       # bias follows a trend over time
+            'volatility_bias',  # bias increases with volatility
+            'cyclical_bias',    # bias follows a cyclical pattern
+            'promo_bias',       # bias affected by promotions
+            'weekend_bias'      # weekend forecasts have different bias
+        ]
+        
+        # Assign bias types to categories with specific distributions
+        category_bias_types = {}
+        
+        # Make 30% of categories have WoM1 underbias to ensure this pattern is learnable
+        wom_categories = random.sample(categories, int(len(categories) * 0.3))
         for category in categories:
-            # Create category-specific characteristics
-            # Some categories inherently have forecast bias patterns
-            category_bias_type = np.random.choice([
-                'unbiased',        # generally accurate
-                'wom_underbias',   # strong WoM1 underbias 
-                'constant_under',  # consistently underforecasted
-                'constant_over',   # consistently overforecasted
-                'seasonal_bias'    # bias changes by season
-            ], p=[0.3, 0.3, 0.2, 0.1, 0.1])  # weighted probabilities
+            if category in wom_categories:
+                category_bias_types[category] = 'wom_underbias'
+            else:
+                # Distribute the remaining categories across bias types
+                category_bias_types[category] = random.choice(bias_types)
+        
+        for category in categories:
+            # Category-specific characteristics
+            bias_type = category_bias_types[category]
+            
+            # Create more diversity in category volumes
+            volume_multiplier = np.random.uniform(0.5, 2.0)
             
             for band in bands:
                 # More SKUs for higher bands
-                num_skus = 20 if band == 'A' else (10 if band == 'B' else 5)
+                num_skus = int(30 * volume_multiplier) if band == 'A' else (
+                            int(20 * volume_multiplier) if band == 'B' else int(10 * volume_multiplier))
+                
                 for i in range(1, num_skus + 1):
-                    skus.append((f"SKU_{category}_{band}_{i}", category, band, category_bias_type))
+                    skus.append((f"SKU_{category}_{band}_{i}", category, band, bias_type))
         
-        # Create dataframe
+        logger.info(f"Creating {len(skus)} synthetic SKUs across {len(categories)} categories")
+        
+        # Create dataframe with enhanced patterns
         data = []
         for date in dates:
             # Extract date features
-            week_of_month = (date.day - 1) // 7 + 1
             month = date.month
             day_of_week = date.weekday()
             is_weekend = 1 if day_of_week >= 5 else 0
             
+            # Calculate week of month (1-4)
+            week_of_month = (date.day - 1) // 7 + 1
+            
+            # Special event indicators - holidays, etc.
+            is_holiday = 1 if ((date.month == 12 and date.day >= 15) or 
+                            (date.month == 11 and date.day >= 20 and date.day <= 30) or
+                            (date.month == 1 and date.day <= 5)) else 0
+            
+            # Quarter end effect
+            is_quarter_end = 1 if date.month in [3, 6, 9, 12] and date.day >= 25 else 0
+            
             for sku, category, band, bias_type in skus:
-                # Base forecast depends on band
-                base_forecast = 1000 if band == 'A' else (500 if band == 'B' else 200)
+                # Base forecast depends on band and includes more complex patterns
+                if band == 'A':
+                    base_forecast = 1000 * (1 + 0.2 * np.sin(date.day * np.pi / 15))  # Cyclical pattern
+                elif band == 'B':
+                    base_forecast = 500 * (1 + 0.15 * np.sin(date.day * np.pi / 10))
+                else:  # band C
+                    base_forecast = 200 * (1 + 0.1 * np.sin(date.day * np.pi / 7))
                 
                 # Add category-specific variation (10-30%)
-                category_factor = 1.0 + (int(category.split('_')[1]) % 3) * 0.1
+                if isinstance(category, str) and '_' in category:
+                    category_num = int(category.split('_')[1])
+                    category_factor = 1.0 + (category_num % 5) * 0.05  # More gradual variation
+                else:
+                    category_factor = 1.0 + (hash(category) % 10) * 0.03
                 
                 # Add WoM effect - ML forecast doesn't fully account for WoM1 increases
                 wom_factor = 1.0
-                if bias_type == 'wom_underbias' and week_of_month == 1:
-                    # In WoM1, ML forecast is systematically low
-                    wom_factor = 0.85  # ML underforecasts by 15% in WoM1
+                if bias_type == 'wom_underbias':
+                    if week_of_month == 1:
+                        # In WoM1, ML forecast is systematically low
+                        wom_factor = 0.85  # ML underforecasts by 15% in WoM1
+                    elif week_of_month == 4:
+                        # Some categories might also have WoM4 bias
+                        wom_factor = 0.95
                 
                 # Add constant bias patterns
                 constant_bias_factor = 1.0
@@ -153,24 +204,78 @@ class DataProvider:
                     elif month in [7, 8, 9]:
                         seasonal_factor = 1.1
                 
+                # Add trend bias - forecast accuracy deteriorates or improves over time
+                trend_factor = 1.0
+                if bias_type == 'trend_bias':
+                    # As we get closer to current date, forecasts improve
+                    days_from_start = (date - start_date).days
+                    if days_from_start < 90:
+                        trend_factor = 0.9 + (days_from_start / 900)  # Gradually improves
+                
+                # Add cyclical bias - alternating periods of over/under forecasting
+                cyclical_factor = 1.0
+                if bias_type == 'cyclical_bias':
+                    day_of_year = date.timetuple().tm_yday
+                    cyclical_factor = 1.0 + 0.1 * np.sin(day_of_year * np.pi / 45)
+                
+                # Add promo effect
+                promo_factor = 1.0
+                if bias_type == 'promo_bias' and random.random() < 0.15:  # 15% chance of promo
+                    promo_factor = 0.8  # Promos tend to be underforecasted
+                
+                # Add weekend effect
+                weekend_factor = 1.0
+                if bias_type == 'weekend_bias' and is_weekend:
+                    weekend_factor = 1.1  # Weekend forecasts tend to be overforecasted
+                
+                # Add holiday effects - underforecasted during holidays
+                holiday_factor = 1.0
+                if is_holiday:
+                    holiday_factor = 0.85 + 0.1 * random.random()  # 0.85-0.95
+                
+                # Add quarter end effects - often overforecasted
+                quarter_end_factor = 1.0
+                if is_quarter_end:
+                    quarter_end_factor = 1.05 + 0.1 * random.random()  # 1.05-1.15
+                
                 # Add day of week pattern
-                dow_factor = 1.0 - 0.2 * is_weekend  # Lower forecasts on weekends
+                dow_factor = 1.0
+                if day_of_week == 0:  # Monday
+                    dow_factor = 0.95  # Monday forecasts tend to be overforecasted
+                elif day_of_week == 5 or day_of_week == 6:  # Weekend
+                    dow_factor = 1.2  # Weekend forecasts tend to be underforecasted
                 
                 # Add randomness to each SKU (±5%)
-                sku_factor = 1.0 + (hash(sku) % 100) / 1000 - 0.05
+                sku_factor = 1.0
+                if isinstance(sku, str):
+                    sku_seed = sum(ord(c) for c in sku)
+                    sku_factor = 1.0 + (sku_seed % 100) / 1000 - 0.05
+                else:
+                    sku_factor = 1.0 + (hash(str(sku)) % 100) / 1000 - 0.05
                 
-                # Add random noise (±10%)
-                noise = np.random.normal(0, 0.1)
+                # Add random noise - different noise levels based on band
+                if band == 'A':
+                    noise = np.random.normal(0, 0.05)  # Less noise for high volume
+                elif band == 'B':
+                    noise = np.random.normal(0, 0.08)
+                else:  # band C
+                    noise = np.random.normal(0, 0.12)  # More noise for low volume
                 
-                # Calculate final forecast
+                # Calculate final forecast with all factors
                 forecast = (base_forecast 
-                           * category_factor 
-                           * wom_factor 
-                           * constant_bias_factor
-                           * seasonal_factor
-                           * dow_factor
-                           * sku_factor
-                           * (1 + noise))
+                        * category_factor 
+                        * wom_factor 
+                        * constant_bias_factor
+                        * seasonal_factor
+                        * trend_factor
+                        * cyclical_factor
+                        * promo_factor
+                        * weekend_factor
+                        * holiday_factor
+                        * quarter_end_factor
+                        * dow_factor
+                        * sku_factor
+                        * (1 + noise))
                 
                 data.append({
                     'date': date,
@@ -180,6 +285,8 @@ class DataProvider:
                     'bias_type': bias_type,  # store bias type for reference
                     'forecast': max(0, forecast)  # Ensure non-negative
                 })
+        
+        logger.info(f"Created {len(data)} synthetic forecast records")
         
         # Convert to DataFrame
         df = pd.DataFrame(data)

@@ -282,3 +282,49 @@ def ensure_dir(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
         logger.info(f"Created directory: {directory}")
+
+def print_config_summary(config):
+    """
+    Print a summary of the configuration for debugging.
+    
+    Args:
+        config: Configuration dictionary
+    """
+    print("\n==== Configuration Summary ====")
+    
+    if isinstance(config, dict):
+        # Check for expected structure
+        if 'SYSTEM_CONFIG' in config:
+            print(f"√ SYSTEM_CONFIG found")
+            device = config['SYSTEM_CONFIG'].get('device', 'Not specified')
+            print(f"  - Device: {device}")
+        else:
+            print("× SYSTEM_CONFIG not found")
+        
+        if 'AGENT_CONFIG' in config:
+            print(f"√ AGENT_CONFIG found")
+            print(f"  - Learning rate: {config['AGENT_CONFIG'].get('learning_rate', 'Not specified')}")
+        else:
+            print("× AGENT_CONFIG not found")
+            
+        # Check for other expected configs
+        for config_name in ['ACTION_CONFIG', 'STATE_CONFIG', 'REWARD_CONFIG', 
+                            'TRAINING_CONFIG', 'DATA_CONFIG', 'FEATURE_CONFIG']:
+            if config_name in config:
+                print(f"√ {config_name} found")
+            else:
+                print(f"× {config_name} not found")
+    else:
+        print(f"! Config is not a dictionary: {type(config)}")
+        
+        # Try to extract __dict__ if it's a module
+        if hasattr(config, '__dict__'):
+            print("  Config appears to be a module, checking __dict__:")
+            module_dict = config.__dict__
+            for key in ['SYSTEM_CONFIG', 'AGENT_CONFIG', 'ACTION_CONFIG']:
+                if key in module_dict:
+                    print(f"  √ {key} found in module.__dict__")
+                else:
+                    print(f"  × {key} NOT found in module.__dict__")
+    
+    print("==============================\n")
